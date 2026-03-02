@@ -1,0 +1,156 @@
+import aiosqlite
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from datetime import datetime, timedelta
+
+from database import DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, get_free_times
+from keyboards.patient_kb import patient_main_menu
+from keyboards.calendar_kb import create_calendar
+from keyboards.inline_kb import create_time_keyboard
+from utils.validators import clean_phone, is_valid_phone
+
+router = Router()
+
+class BookingStates(StatesGroup):
+    waiting_for_date = State()
+    waiting_for_time = State()
+    waiting_for_phone = State()
+
+@router.message(F.text == "📝 Записаться")
+async def start_booking(message: Message, state: FSMContext):
+    await message.answer("Выберите дату:", reply_markup=create_calendar())
+    await state.set_state(BookingStates.waiting_for_date)
+
+@router.callback_query(BookingStates.waiting_for_date, F.data.startswith("cal_"))
+async def calendar_navigation(callback: CallbackQuery):
+    _, year, month = callback.data.split("_")
+    await callback.message.edit_text("Выберите дату:", reply_markup=create_calendar(int(year), int(month)))
+
+@router.callback_query(BookingStates.waiting_for_date, F.data == "cancel_booking")
+async def cancel_booking(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer("❌ Запись отменена", reply_markup=patient_main_menu())
+
+@router.callback_query(BookingStates.waiting_for_date, F.data.startswith("date_"))
+async def date_selected(callback: CallbackQuery, state: FSMContext):
+    date_str = callback.data.split("_")[1]
+    await state.update_data(selected_date=date_str)
+    
+    free_times = await get_free_times(date_str)
+    
+    if not free_times:
+        await callback.message.edit_text("❌ На эту дату нет свободных слотов.\nВыберите другую дату:", reply_markup=create_calendar())
+        return
+    
+    await callback.message.edit_text(f"📅 {date_str}\n\nВыберите время:", reply_markup=create_time_keyboard(free_times))
+    await state.set_state(BookingStates.waiting_for_time)
+
+@router.callback_query(BookingStates.waiting_for_time, F.data.startswith("time_"))
+async def time_selected(callback: CallbackQuery, state: FSMContext):
+    slot_id = int(callback.data.split("_")[1])
+    await state.update_data(slot_id=slot_id)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT phone FROM patients WHERE telegram_id = ?", (callback.from_user.id,))
+        patient = await cursor.fetchone()
+    
+    if patient and patient[0]:
+        await confirm_booking(callback, state)
+    else:
+        await callback.message.edit_text("📱 Введите ваш номер телефона для связи\n(например: +79001234567)", reply_markup=None)
+        await state.set_state(BookingStates.waiting_for_phone)
+
+@router.callback_query(BookingStates.waiting_for_time, F.data == "back_to_calendar")
+async def back_to_calendar(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Выберите дату:", reply_markup=create_calendar())
+    await state.set_state(BookingStates.waiting_for_date)
+
+@router.message(BookingStates.waiting_for_phone)
+async def phone_entered(message: Message, state: FSMContext):
+    phone = clean_phone(message.text)
+    
+    if not is_valid_phone(phone):
+        await message.answer("❌ Некорректный номер. Попробуйте ещё раз:")
+        return
+    
+    await save_patient(message.from_user.id, message.from_user.full_name, phone)
+    await confirm_booking(message, state)
+
+async def confirm_booking(event, state: FSMContext):
+    data = await state.get_data()
+    slot_id = data["slot_id"]
+    patient_id = await get_patient_id(event.from_user.id)
+    
+    if not patient_id:
+        await event.answer("❌ Ошибка: пациент не найден", reply_markup=patient_main_menu())
+        await state.clear()
+        return
+    
+    success = await book_slot(slot_id, patient_id)
+    
+    if success:
+        await event.answer("✅ Вы успешно записаны!\n\n🔔 Напоминание придет за 24 часа.\n\n❌ Отменить можно в «Мои записи»", reply_markup=patient_main_menu())
+    else:
+        await event.answer("❌ К сожалению, это время только что заняли.\nПопробуйте выбрать другое.", reply_markup=patient_main_menu())
+    
+    await state.clear()
+
+@router.message(F.text == "📅 Мои записи")
+async def my_appointments(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT s.id, s.slot_date, s.slot_time
+            FROM slots s
+            JOIN patients p ON s.patient_id = p.id
+            WHERE p.telegram_id = ? AND s.status = 'booked' AND s.slot_date >= date('now')
+            ORDER BY s.slot_date, s.slot_time
+        """, (message.from_user.id,))
+        appointments = await cursor.fetchall()
+    
+    if not appointments:
+        await message.answer("📅 У вас нет предстоящих записей.", reply_markup=patient_main_menu())
+        return
+    
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    
+    for slot_id, date, time in appointments:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{slot_id}")]
+        ])
+        await message.answer(f"📅 {date} в {time}", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("cancel_"))
+async def cancel_appointment(callback: CallbackQuery):
+    slot_id = int(callback.data.split("_")[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT slot_date, slot_time FROM slots WHERE id = ?", (slot_id,))
+        row = await cursor.fetchone()
+        
+        if not row:
+            await callback.answer("❌ Запись не найдена", show_alert=True)
+            return
+        
+        date_str, time_str = row
+        appointment_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        
+        if appointment_time - datetime.now() < timedelta(hours=24):
+            await callback.answer("❌ Отменить можно не позднее чем за 24 часа до приема.\nПозвоните врачу по телефону +7 (999) 123-45-67", show_alert=True)
+            return
+    
+    patient_id = await get_patient_id(callback.from_user.id)
+    
+    if not patient_id:
+        await callback.answer("❌ Ошибка: пациент не найден", show_alert=True)
+        return
+    
+    success = await cancel_slot(slot_id, patient_id)
+    
+    if success:
+        await callback.message.edit_text("✅ Запись отменена. Слот освобожден.")
+        await callback.answer("✅ Отменено")
+    else:
+        await callback.answer("❌ Ошибка при отмене", show_alert=True)
