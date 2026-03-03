@@ -20,6 +20,29 @@ class BookingStates(StatesGroup):
 
 @router.message(F.text == "📝 Записаться")
 async def start_booking(message: Message, state: FSMContext):
+    # Получаем ID пациента
+    patient_id = await get_patient_id(message.from_user.id)
+    
+    if patient_id:
+        # Проверяем, есть ли у него активная запись
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT slot_date, slot_time FROM slots 
+                WHERE patient_id = ? AND status = 'booked'
+            """, (patient_id,))
+            existing = await cursor.fetchone()
+            
+            if existing:
+                date_str, time_str = existing
+                await message.answer(
+                    f"📅 У вас уже есть запись:\n"
+                    f"🗓 {date_str} в {time_str}\n\n"
+                    f"Вы можете отменить её в «Мои записи».",
+                    reply_markup=patient_main_menu()
+                )
+                return
+    
+    # Если активной записи нет — показываем календарь
     await message.answer("Выберите дату:", reply_markup=create_calendar())
     await state.set_state(BookingStates.waiting_for_date)
 
@@ -97,7 +120,6 @@ async def confirm_booking(event, state: FSMContext):
     slot_id = data["slot_id"]
     selected_date = data["selected_date"]
     
-    # ПОЛУЧАЕМ ВРЕМЯ СЛОТА ИЗ БАЗЫ
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT slot_time FROM slots WHERE id = ?", 
@@ -111,7 +133,6 @@ async def confirm_booking(event, state: FSMContext):
         
         slot_time = row[0]
     
-    # ПРОВЕРЯЕМ, ЧТО ДО ПРИЁМА > 3 ЧАСОВ
     appointment_time = datetime.strptime(f"{selected_date} {slot_time}", "%Y-%m-%d %H:%M")
     now = datetime.now()
     
@@ -124,7 +145,6 @@ async def confirm_booking(event, state: FSMContext):
         await state.clear()
         return
     
-    # ПОЛУЧАЕМ ID ПАЦИЕНТА
     patient_id = await get_patient_id(event.from_user.id)
     
     if not patient_id:
@@ -132,7 +152,6 @@ async def confirm_booking(event, state: FSMContext):
         await state.clear()
         return
     
-    # БРОНИРУЕМ СЛОТ
     success = await book_slot(slot_id, patient_id, selected_date)
     
     if success:
@@ -203,7 +222,6 @@ async def cancel_appointment(callback: CallbackQuery):
 
         date_str, time_str, slot_patient_id = row
         
-        # Проверяем, что это его запись
         patient_id = await get_patient_id(callback.from_user.id)
         if patient_id != slot_patient_id:
             await callback.message.answer("❌ Это не ваша запись")
@@ -223,8 +241,10 @@ async def cancel_appointment(callback: CallbackQuery):
     success = await cancel_slot(slot_id, patient_id)
 
     if success:
-        await callback.message.edit_text("✅ Запись отменена. Слот освобожден.")
-        await callback.answer("✅ Отменено")
+        # ✅ ВСЁ В ЧАТ: новое сообщение + удаляем старое
+        await callback.message.answer("✅ Запись отменена. Слот освобожден.")
+        await callback.message.delete()
+        await callback.answer()
     else:
         await callback.message.answer("❌ Ошибка при отмене")
         await callback.answer()
