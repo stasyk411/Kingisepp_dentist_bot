@@ -16,9 +16,10 @@ async def cmd_start(message: Message, is_admin: bool):
 async def contacts(message: Message, is_admin: bool):
     kb = admin_main_menu() if is_admin else patient_main_menu()
     await message.answer(
-        "📞 Телефон: +7 (999) 123-45-67\n"
-        "📍 Адрес: ул. Ленина, д. 10\n"
-        "🚗 Как добраться: 5 минут от метро",
+        "👩‍⚕️ Врач: Голосовская Светлана Алексеевна\n"
+        "📞 Телефон: +7 (911) 775-04-24\n"
+        "📍 Адрес: Большая Советская улица, 8 (второй этаж)\n"
+        "💰 Приём: платный",
         reply_markup=kb
     )
 
@@ -31,7 +32,9 @@ async def help_cmd(message: Message, is_admin: bool):
         "2. Выберите дату и время\n"
         "3. Подтвердите запись\n\n"
         "❌ Отменить можно за 24 часа до приёма\n\n"
-        "По вопросам: +7 (999) 123-45-67",
+        "👩‍⚕️ Врач: Голосовская Светлана Алексеевна\n"
+        "📞 По вопросам: +7 (911) 775-04-24\n"
+        "📍 Адрес: Большая Советская улица, 8 (второй этаж)",
         reply_markup=kb
     )
 
@@ -39,7 +42,7 @@ async def help_cmd(message: Message, is_admin: bool):
 async def support(message: Message, is_admin: bool):
     kb = admin_main_menu() if is_admin else patient_main_menu()
     await message.answer(
-        "💳 Номер карты: 1234 5678 9012 3456\n\n"
+        "💳 Номер телефона:+79052146265 \n\n"
         "Спасибо за поддержку! ❤️",
         reply_markup=kb
     )
