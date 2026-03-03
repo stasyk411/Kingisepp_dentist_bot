@@ -6,7 +6,6 @@ DB_PATH = "dentist_bot.db"
 async def init_db():
     """Инициализация базы данных"""
     async with aiosqlite.connect(DB_PATH) as db:
-        # Таблица пациентов
         await db.execute("""
             CREATE TABLE IF NOT EXISTS patients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,7 +16,6 @@ async def init_db():
             )
         """)
 
-        # Таблица слотов (расписание)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS slots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,25 +33,22 @@ async def init_db():
 
         await db.commit()
 
-    # Создаем тестовые слоты на 14 дней вперед
     await generate_test_slots()
+    await complete_old_appointments()  # Добавлено: завершаем старые записи при старте
 
 async def generate_test_slots():
-    """Генерация тестовых слотов для MVP"""
     async with aiosqlite.connect(DB_PATH) as db:
         from datetime import datetime, timedelta
         
         start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
-        for day in range(1, 15):  # на 2 недели вперед
+        for day in range(0, 15):
             current_date = start_date + timedelta(days=day)
             date_str = current_date.strftime("%Y-%m-%d")
             
-            # Пропускаем субботу и воскресенье
             if current_date.weekday() >= 5:
                 continue
             
-            # Создаем слоты с 10 до 15 (5 слотов в день)
             for hour in range(10, 15):
                 time_str = f"{hour:02d}:00"
                 await db.execute("""
@@ -63,7 +58,19 @@ async def generate_test_slots():
         
         await db.commit()
 
-async def book_slot(slot_id: int, patient_id: int) -> bool:
+async def complete_old_appointments():
+    """Завершает все записи, у которых дата прошла"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        today = datetime.now().strftime("%Y-%m-%d")
+        await db.execute("""
+            UPDATE slots 
+            SET status = 'completed' 
+            WHERE status = 'booked' AND slot_date < ?
+        """, (today,))
+        await db.commit()
+        print(f"✅ Завершены старые записи на даты до {today}")
+
+async def book_slot(slot_id: int, patient_id: int, selected_date: str) -> bool:
     """Атомарное бронирование слота с транзакцией"""
     async with aiosqlite.connect(DB_PATH) as db:
         try:
@@ -80,6 +87,18 @@ async def book_slot(slot_id: int, patient_id: int) -> bool:
                 await db.rollback()
                 return False
             
+            # ПРОВЕРКА: есть ли у пациента другая активная запись (на любую дату)
+            cursor = await db.execute("""
+                SELECT id FROM slots 
+                WHERE patient_id = ? AND status = 'booked'
+            """, (patient_id,))
+            existing = await cursor.fetchone()
+            
+            if existing:
+                print(f"❌ У пациента уже есть активная запись (id={existing[0]})")
+                await db.rollback()
+                return False
+            
             # Бронируем
             await db.execute("""
                 UPDATE slots 
@@ -89,14 +108,13 @@ async def book_slot(slot_id: int, patient_id: int) -> bool:
             
             await db.commit()
             return True
-        except Exception:
+        except Exception as e:
+            print(f"Ошибка: {e}")
             await db.rollback()
             return False
 
 async def cancel_slot(slot_id: int, patient_id: int) -> bool:
-    """Отмена записи пациентом"""
     async with aiosqlite.connect(DB_PATH) as db:
-        # Проверяем, что это его запись
         cursor = await db.execute(
             "SELECT status FROM slots WHERE id = ? AND patient_id = ?",
             (slot_id, patient_id)
@@ -113,7 +131,6 @@ async def cancel_slot(slot_id: int, patient_id: int) -> bool:
         return True
 
 async def get_patient_id(telegram_id: int) -> int:
-    """Получить ID пациента по telegram_id"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id FROM patients WHERE telegram_id = ?",
@@ -123,7 +140,6 @@ async def get_patient_id(telegram_id: int) -> int:
         return row[0] if row else None
 
 async def save_patient(telegram_id: int, name: str, phone: str = None):
-    """Сохранить или обновить данные пациента"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR REPLACE INTO patients (telegram_id, name, phone)
@@ -132,7 +148,6 @@ async def save_patient(telegram_id: int, name: str, phone: str = None):
         await db.commit()
 
 async def get_free_times(date_str: str):
-    """Получить свободные слоты на дату"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT id, slot_time 
