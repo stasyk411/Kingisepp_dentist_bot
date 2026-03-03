@@ -34,9 +34,10 @@ async def init_db():
         await db.commit()
 
     await generate_test_slots()
-    await complete_old_appointments()  # Добавлено: завершаем старые записи при старте
+    await fix_broken_bookings()  # ✅ Исправляем битые записи при старте
 
 async def generate_test_slots():
+    """Генерация тестовых слотов"""
     async with aiosqlite.connect(DB_PATH) as db:
         from datetime import datetime, timedelta
         
@@ -58,17 +59,26 @@ async def generate_test_slots():
         
         await db.commit()
 
-async def complete_old_appointments():
-    """Завершает все записи, у которых дата прошла"""
+async def fix_broken_bookings():
+    """Исправляет битые записи при запуске"""
     async with aiosqlite.connect(DB_PATH) as db:
+        # 1. Завершаем старые записи (дата прошла)
         today = datetime.now().strftime("%Y-%m-%d")
         await db.execute("""
             UPDATE slots 
             SET status = 'completed' 
             WHERE status = 'booked' AND slot_date < ?
         """, (today,))
+        
+        # 2. Чиним записи без patient_id (если такие есть)
+        await db.execute("""
+            UPDATE slots 
+            SET status = 'free', patient_id = NULL 
+            WHERE status = 'booked' AND patient_id IS NULL
+        """)
+        
         await db.commit()
-        print(f"✅ Завершены старые записи на даты до {today}")
+        print("✅ Битые записи исправлены")
 
 async def book_slot(slot_id: int, patient_id: int, selected_date: str) -> bool:
     """Атомарное бронирование слота с транзакцией"""
@@ -114,6 +124,7 @@ async def book_slot(slot_id: int, patient_id: int, selected_date: str) -> bool:
             return False
 
 async def cancel_slot(slot_id: int, patient_id: int) -> bool:
+    """Отмена записи пациентом"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT status FROM slots WHERE id = ? AND patient_id = ?",
@@ -131,6 +142,7 @@ async def cancel_slot(slot_id: int, patient_id: int) -> bool:
         return True
 
 async def get_patient_id(telegram_id: int) -> int:
+    """Получить ID пациента по telegram_id"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id FROM patients WHERE telegram_id = ?",
@@ -140,6 +152,7 @@ async def get_patient_id(telegram_id: int) -> int:
         return row[0] if row else None
 
 async def save_patient(telegram_id: int, name: str, phone: str = None):
+    """Сохранить или обновить данные пациента"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR REPLACE INTO patients (telegram_id, name, phone)
@@ -148,6 +161,7 @@ async def save_patient(telegram_id: int, name: str, phone: str = None):
         await db.commit()
 
 async def get_free_times(date_str: str):
+    """Получить свободные слоты на дату"""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT id, slot_time 
