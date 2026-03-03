@@ -42,10 +42,9 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
     free_times = await get_free_times(date_str)
 
     if not free_times:
-        await callback.message.edit_text(
+        await callback.message.answer(
             "❌ На эту дату нет свободных слотов.\n"
-            "Выберите другую дату:", 
-            reply_markup=create_calendar()
+            "Попробуйте выбрать другую дату."
         )
         return
 
@@ -133,7 +132,7 @@ async def confirm_booking(event, state: FSMContext):
         await state.clear()
         return
     
-    # БРОНИРУЕМ СЛОТ (вся логика проверок теперь ВНУТРИ book_slot)
+    # БРОНИРУЕМ СЛОТ
     success = await book_slot(slot_id, patient_id, selected_date)
     
     if success:
@@ -144,7 +143,6 @@ async def confirm_booking(event, state: FSMContext):
             reply_markup=patient_main_menu()
         )
     else:
-        # Получаем причину отказа из базы данных
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
                 "SELECT status FROM slots WHERE id = ?", 
@@ -199,7 +197,8 @@ async def cancel_appointment(callback: CallbackQuery):
         row = await cursor.fetchone()
 
         if not row:
-            await callback.answer("❌ Запись не найдена", show_alert=True)
+            await callback.message.answer("❌ Запись не найдена")
+            await callback.answer()
             return
 
         date_str, time_str, slot_patient_id = row
@@ -207,17 +206,18 @@ async def cancel_appointment(callback: CallbackQuery):
         # Проверяем, что это его запись
         patient_id = await get_patient_id(callback.from_user.id)
         if patient_id != slot_patient_id:
-            await callback.answer("❌ Это не ваша запись", show_alert=True)
+            await callback.message.answer("❌ Это не ваша запись")
+            await callback.answer()
             return
         
         appointment_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
 
         if appointment_time - datetime.now() < timedelta(hours=24):
-            await callback.answer(
+            await callback.message.answer(
                 "❌ Отменить можно не позднее чем за 24 часа до приема.\n"
-                "Позвоните врачу по телефону +7 (999) 123-45-67", 
-                show_alert=True
+                f"Позвоните врачу: +7 (911) 775-04-24"
             )
+            await callback.answer()
             return
 
     success = await cancel_slot(slot_id, patient_id)
@@ -226,4 +226,5 @@ async def cancel_appointment(callback: CallbackQuery):
         await callback.message.edit_text("✅ Запись отменена. Слот освобожден.")
         await callback.answer("✅ Отменено")
     else:
-        await callback.answer("❌ Ошибка при отмене", show_alert=True)
+        await callback.message.answer("❌ Ошибка при отмене")
+        await callback.answer()
