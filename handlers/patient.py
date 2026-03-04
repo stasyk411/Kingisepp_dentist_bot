@@ -175,9 +175,17 @@ async def confirm_booking(event, state: FSMContext):
     # Дополнительная проверка на блокировку (на случай, если заблокировали в процессе)
     blocked = await get_blocked_day(selected_date)
     if blocked:
+        reason_map = {
+            "Отпуск": "🏖 Врач в отпуске",
+            "Больничный": "🤒 Врач на больничном",
+            "Ремонт": "🛠 Ведутся технические работы",
+            "Выходной": "📅 Выходной день"
+        }
+        message_text = reason_map.get(blocked["reason"], f"🚫 {blocked['reason']}")
+        
         await event.answer(
-            "❌ Извините, этот день был заблокирован.\n"
-            "Пожалуйста, выберите другую дату.",
+            f"{message_text}\n"
+            f"Пожалуйста, выберите другую дату.",
             reply_markup=patient_main_menu()
         )
         await state.clear()

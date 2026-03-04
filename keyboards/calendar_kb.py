@@ -51,20 +51,22 @@ def create_calendar(year: int = None, month: int = None, status_dict: dict = Non
                     reason = status_dict[date_str]
                     
                     if for_patient:
-                        # Для клиента — понятные эмодзи
+                        # Для клиента — понятные иконки
                         if reason == "Отпуск":
                             emoji = "🏖 "
                         elif reason == "Больничный":
                             emoji = "🤒 "
-                        elif reason == "Ремонт":
-                            emoji = "🛠 "
-                        elif reason == "Выходной":
-                            emoji = "📅 "
                         else:
-                            emoji = "🚫 "
+                            emoji = "🚫 "  # на всякий случай
                     else:
-                        # Для админа — просто замок
+                        # Для админа — просто замок (без разницы, какая причина)
                         emoji = "🔒 "
+                
+                # Для клиента: выходные СБ, ВС — добавляем ⚪
+                if for_patient:
+                    weekday_num = datetime.strptime(date_str, "%Y-%m-%d").weekday()
+                    if weekday_num >= 5 and date_str not in status_dict:
+                        emoji = "⚪ "
                 
                 week_row.append(
                     InlineKeyboardButton(

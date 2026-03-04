@@ -94,9 +94,17 @@ async def cancel_day_confirm(callback: CallbackQuery, is_admin: bool):
         )
         existing = await cursor.fetchone()
         if existing:
+            # Даем возможность снять блокировку
+            kb = InlineKeyboardBuilder()
+            kb.button(text="🔓 Снять блокировку", callback_data=f"unblock_{date_str}")
+            kb.button(text="🔙 Назад", callback_data="back_to_admin")
+            kb.adjust(1)
+            
             await callback.message.edit_text(
                 f"⚠️ День {date_str} уже заблокирован.\n"
-                f"Причина: {existing[0]}"
+                f"Причина: {existing[0]}\n\n"
+                f"Что делаем?",
+                reply_markup=kb.as_markup()
             )
             return
     
@@ -140,9 +148,8 @@ async def ask_reason(callback: CallbackQuery, date_str: str):
     kb = InlineKeyboardBuilder()
     kb.button(text="🏖 Отпуск", callback_data=f"reason_vacation_{date_str}")
     kb.button(text="🤒 Больничный", callback_data=f"reason_sick_{date_str}")
-    kb.button(text="🛠 Ремонт", callback_data=f"reason_repair_{date_str}")
     kb.button(text="📅 Выходной", callback_data=f"reason_dayoff_{date_str}")
-    kb.button(text="❌ Отмена", callback_data="back_to_admin")
+    kb.button(text="🔙 Отмена", callback_data="back_to_admin")
     kb.adjust(1)
     
     await callback.message.edit_text(
@@ -160,14 +167,15 @@ async def save_reason(callback: CallbackQuery, is_admin: bool):
     reason_type = parts[1]
     date_str = parts[2]
     
-    # Маппинг причин
-    reason_map = {
-        "vacation": "Отпуск",
-        "sick": "Больничный",
-        "repair": "Ремонт",
-        "dayoff": "Выходной"
-    }
-    reason_text = reason_map.get(reason_type, "Другое")
+    # Определяем причину
+    if reason_type == "vacation":
+        reason_text = "Отпуск"
+    elif reason_type == "sick":
+        reason_text = "Больничный"
+    elif reason_type == "dayoff":
+        reason_text = "Выходной"
+    else:
+        reason_text = "Другое"
     
     # Сохраняем в blocked_days
     await block_day(date_str, reason_text, "")
@@ -195,6 +203,29 @@ async def cancel_day_execute(callback: CallbackQuery, is_admin: bool):
     
     # Переходим к выбору причины
     await ask_reason(callback, date_str)
+
+@router.callback_query(F.data.startswith("unblock_"))
+async def unblock_day(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    date_str = callback.data.split("_")[1]
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Удаляем из blocked_days
+        await db.execute("DELETE FROM blocked_days WHERE block_date = ?", (date_str,))
+        # Возвращаем статус слотов в 'free'
+        await db.execute("""
+            UPDATE slots 
+            SET status='free', patient_id=NULL, cancelled_by=NULL 
+            WHERE slot_date = ?
+        """, (date_str,))
+        await db.commit()
+    
+    await callback.message.edit_text(
+        f"✅ Блокировка снята с {date_str}.\n"
+        f"День снова доступен для записи."
+    )
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: CallbackQuery, is_admin: bool):
