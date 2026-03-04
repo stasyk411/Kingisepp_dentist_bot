@@ -44,6 +44,15 @@ async def init_db():
             )
         """)
 
+        # ✅ НОВАЯ ТАБЛИЦА: настройки рабочего времени по дням недели
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS working_hours (
+                day TEXT PRIMARY KEY,
+                start_hour TEXT,
+                end_hour TEXT
+            )
+        """)
+
         await db.commit()
 
     await generate_test_slots()
@@ -217,3 +226,38 @@ async def get_all_blocked_days():
         cursor = await db.execute("SELECT block_date, reason, comment FROM blocked_days ORDER BY block_date")
         rows = await cursor.fetchall()
         return [{"date": row[0], "reason": row[1], "comment": row[2]} for row in rows]
+
+# ============================================
+# ✅ НОВЫЕ ФУНКЦИИ ДЛЯ РАБОЧИХ ЧАСОВ (WORKING HOURS)
+# ============================================
+
+async def save_working_hours(day: str, start_hour: str, end_hour: str):
+    """Сохранить рабочие часы для дня недели"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO working_hours (day, start_hour, end_hour)
+            VALUES (?, ?, ?)
+        """, (day, start_hour, end_hour))
+        await db.commit()
+
+async def get_working_hours(day: str):
+    """Получить рабочие часы для конкретного дня"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT start_hour, end_hour FROM working_hours WHERE day = ?",
+            (day,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            return {"start": row[0], "end": row[1]}
+        return None
+
+async def get_all_working_hours():
+    """Получить все настройки рабочих часов"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT day, start_hour, end_hour FROM working_hours")
+        rows = await cursor.fetchall()
+        result = {}
+        for row in rows:
+            result[row[0]] = {"start": row[1], "end": row[2]}
+        return result

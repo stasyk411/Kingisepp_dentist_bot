@@ -4,11 +4,14 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, timedelta
 
-from database import DB_PATH, block_day, get_all_blocked_days
+from database import DB_PATH, block_day, get_all_blocked_days, get_all_working_hours, get_working_hours
 from keyboards.admin_kb import admin_main_menu
 from keyboards.calendar_kb import create_calendar
+from keyboards.inline_kb import days_keyboard, hours_start_keyboard, hours_end_keyboard
 
 router = Router()
+
+# -------------------- СУЩЕСТВУЮЩИЕ ХЕНДЛЕРЫ --------------------
 
 @router.message(F.text == "📋 Сегодня")
 async def today(message: Message, is_admin: bool):
@@ -232,8 +235,213 @@ async def back_to_admin(callback: CallbackQuery, is_admin: bool):
     await callback.message.delete()
     await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
 
-@router.message(F.text == "🔓 Освободить")
-async def free_slot(message: Message, is_admin: bool):
+# -------------------- НОВЫЕ ХЕНДЛЕРЫ НАСТРОЕК --------------------
+
+# Словарь для хранения временных данных настройки (в реальном проекте лучше использовать FSM)
+user_settings = {}
+
+@router.message(F.text == "⚙️ Настройки")
+async def settings_start(message: Message, is_admin: bool):
     if not is_admin:
         return
-    await message.answer("🔓 Функция освобождения слота в разработке.", reply_markup=admin_main_menu())
+    
+    # Получаем текущие настройки из БД
+    settings = await get_all_working_hours()
+    
+    # Формируем текст с текущим расписанием (красиво с эмодзи)
+    days_ru = {"mon": "ПН", "tue": "ВТ", "wed": "СР", "thu": "ЧТ", "fri": "ПТ"}
+    text = "⚙️ <b>Текущее расписание</b>\n\n"
+    
+    for day_code, day_name in days_ru.items():
+        if day_code in settings:
+            text += f"✅ {day_name}: {settings[day_code]['start']}:00 — {settings[day_code]['end']}:00\n"
+        else:
+            text += f"❌ {day_name}: <i>не настроено</i>\n"
+    
+    text += "\nВыберите день для настройки:"
+    
+    await message.answer(text, reply_markup=days_keyboard())
+
+@router.callback_query(F.data.startswith("day_"))
+async def select_day(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    day = callback.data.split("_")[1]
+    user_id = callback.from_user.id
+    
+    # Сохраняем выбранный день
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]["day"] = day
+    
+    # Получаем текущее название дня
+    days_ru = {
+        "mon": "Понедельник",
+        "tue": "Вторник",
+        "wed": "Среда",
+        "thu": "Четверг",
+        "fri": "Пятница"
+    }
+    day_name = days_ru.get(day, day)
+    
+    # Проверяем, есть ли уже настройки для этого дня
+    existing = await get_working_hours(day)
+    
+    if existing:
+        # Если день уже настроен — показываем текущие часы и кнопку изменения
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔄 Изменить", callback_data=f"edit_day_{day}")
+        kb.button(text="🔙 Назад", callback_data="back_to_days")
+        kb.adjust(1)
+        
+        await callback.message.edit_text(
+            f"⚙️ {day_name}\n"
+            f"Текущие часы: {existing['start']}:00 — {existing['end']}:00\n\n"
+            f"Что делаем?",
+            reply_markup=kb.as_markup()
+        )
+    else:
+        # Если не настроен — сразу к выбору часов
+        await callback.message.edit_text(
+            f"⚙️ {day_name}\n\n"
+            f"Выберите время начала работы:",
+            reply_markup=hours_start_keyboard()
+        )
+
+@router.callback_query(F.data.startswith("edit_day_"))
+async def edit_day(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    day = callback.data.split("_")[2]
+    user_id = callback.from_user.id
+    
+    # Сохраняем выбранный день (для изменения)
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]["day"] = day
+    
+    # Получаем название дня
+    days_ru = {
+        "mon": "Понедельник",
+        "tue": "Вторник",
+        "wed": "Среда",
+        "thu": "Четверг",
+        "fri": "Пятница"
+    }
+    day_name = days_ru.get(day, day)
+    
+    await callback.message.edit_text(
+        f"⚙️ {day_name} (изменение)\n\n"
+        f"Выберите новое время начала работы:",
+        reply_markup=hours_start_keyboard()
+    )
+
+@router.callback_query(F.data.startswith("hour_start_"))
+async def select_start_hour(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    hour = callback.data.split("_")[2]
+    user_id = callback.from_user.id
+    
+    # Сохраняем выбранный час начала
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]["start"] = hour
+    
+    # Получаем название дня
+    day = user_settings[user_id].get("day", "")
+    days_ru = {
+        "mon": "Понедельник",
+        "tue": "Вторник",
+        "wed": "Среда",
+        "thu": "Четверг",
+        "fri": "Пятница"
+    }
+    day_name = days_ru.get(day, day)
+    
+    await callback.message.edit_text(
+        f"⚙️ {day_name}\n"
+        f"Начало: {hour}:00\n\n"
+        f"Выберите время окончания работы:",
+        reply_markup=hours_end_keyboard(hour)
+    )
+
+@router.callback_query(F.data.startswith("hour_end_"))
+async def select_end_hour(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    hour = callback.data.split("_")[2]
+    user_id = callback.from_user.id
+    
+    # Сохраняем выбранный час окончания
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+    user_settings[user_id]["end"] = hour
+    
+    # Получаем данные
+    day = user_settings[user_id].get("day", "")
+    start = user_settings[user_id].get("start", "")
+    
+    # Сохраняем в БД (таблица уже существует в database.py)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO working_hours (day, start_hour, end_hour)
+            VALUES (?, ?, ?)
+        """, (day, start, hour))
+        await db.commit()
+    
+    # Получаем название дня
+    days_ru = {
+        "mon": "Понедельник",
+        "tue": "Вторник",
+        "wed": "Среда",
+        "thu": "Четверг",
+        "fri": "Пятница"
+    }
+    day_name = days_ru.get(day, day)
+    
+    await callback.message.edit_text(
+        f"✅ {day_name}: {start}:00 — {hour}:00\n\n"
+        f"Настройка сохранена.",
+        reply_markup=days_keyboard()
+    )
+    
+    # Очищаем временные данные
+    if user_id in user_settings:
+        del user_settings[user_id]
+
+@router.callback_query(F.data == "back_to_days")
+async def back_to_days(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    # Получаем обновленные настройки
+    settings = await get_all_working_hours()
+    
+    # Формируем текст с текущим расписанием
+    days_ru = {"mon": "ПН", "tue": "ВТ", "wed": "СР", "thu": "ЧТ", "fri": "ПТ"}
+    text = "⚙️ <b>Текущее расписание</b>\n\n"
+    
+    for day_code, day_name in days_ru.items():
+        if day_code in settings:
+            text += f"✅ {day_name}: {settings[day_code]['start']}:00 — {settings[day_code]['end']}:00\n"
+        else:
+            text += f"❌ {day_name}: <i>не настроено</i>\n"
+    
+    text += "\nВыберите день для настройки:"
+    
+    await callback.message.edit_text(text, reply_markup=days_keyboard())
+
+@router.callback_query(F.data == "settings_done")
+async def settings_done(callback: CallbackQuery, is_admin: bool):
+    if not is_admin:
+        return
+    
+    await callback.message.delete()
+    await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
+
+# Удаляем старый хендлер "🔓 Освободить" (больше не нужен)
