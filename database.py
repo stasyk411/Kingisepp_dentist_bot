@@ -6,6 +6,9 @@ DB_PATH = "dentist_bot.db"
 async def init_db():
     """Инициализация базы данных"""
     async with aiosqlite.connect(DB_PATH) as db:
+        # ✅ Включаем авто-очистку (постепенное сжатие)
+        await db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS patients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +37,7 @@ async def init_db():
         await db.commit()
 
     await generate_test_slots()
-    await fix_broken_bookings()  # ✅ Исправляем битые записи при старте
+    await fix_broken_bookings()
 
 async def generate_test_slots():
     """Генерация тестовых слотов"""
