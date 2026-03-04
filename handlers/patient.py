@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timedelta
 
-from database import DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, get_free_times
+from database import DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, get_free_times, get_blocked_day, get_all_blocked_days
 from keyboards.patient_kb import patient_main_menu
 from keyboards.calendar_kb import create_calendar
 from keyboards.inline_kb import create_time_keyboard
@@ -42,14 +42,34 @@ async def start_booking(message: Message, state: FSMContext):
                 )
                 return
     
+    # Получаем все заблокированные дни для подсветки в календаре
+    blocked_days = await get_all_blocked_days()
+    blocked_dict = {d["date"]: d["reason"] for d in blocked_days}
+    
     # Если активной записи нет — показываем календарь
-    await message.answer("Выберите дату:", reply_markup=create_calendar())
+    await message.answer(
+        "Выберите дату:", 
+        reply_markup=create_calendar(
+            datetime.now().year, 
+            datetime.now().month, 
+            blocked_dict,
+            for_patient=True
+        )
+    )
     await state.set_state(BookingStates.waiting_for_date)
 
 @router.callback_query(BookingStates.waiting_for_date, F.data.startswith("cal_"))
 async def calendar_navigation(callback: CallbackQuery):
     _, year, month = callback.data.split("_")
-    await callback.message.edit_text("Выберите дату:", reply_markup=create_calendar(int(year), int(month)))
+    
+    # Получаем обновленные заблокированные дни
+    blocked_days = await get_all_blocked_days()
+    blocked_dict = {d["date"]: d["reason"] for d in blocked_days}
+    
+    await callback.message.edit_text(
+        "Выберите дату:", 
+        reply_markup=create_calendar(int(year), int(month), blocked_dict, for_patient=True)
+    )
 
 @router.callback_query(BookingStates.waiting_for_date, F.data == "cancel_booking")
 async def cancel_booking(callback: CallbackQuery, state: FSMContext):
@@ -60,6 +80,26 @@ async def cancel_booking(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(BookingStates.waiting_for_date, F.data.startswith("date_"))
 async def date_selected(callback: CallbackQuery, state: FSMContext):
     date_str = callback.data.split("_")[1]
+    
+    # ✅ Проверяем, не заблокирован ли день
+    blocked = await get_blocked_day(date_str)
+    if blocked:
+        # Показываем причину блокировки
+        reason_map = {
+            "Отпуск": "🏖 Врач в отпуске",
+            "Больничный": "🤒 Врач на больничном",
+            "Ремонт": "🛠 Ведутся технические работы",
+            "Выходной": "📅 Выходной день"
+        }
+        message_text = reason_map.get(blocked["reason"], f"🚫 {blocked['reason']}")
+        
+        await callback.message.answer(
+            f"{message_text}\n"
+            f"Пожалуйста, выберите другую дату."
+        )
+        await callback.answer()
+        return
+    
     await state.update_data(selected_date=date_str)
 
     free_times = await get_free_times(date_str)
@@ -101,7 +141,19 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(BookingStates.waiting_for_time, F.data == "back_to_calendar")
 async def back_to_calendar(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Выберите дату:", reply_markup=create_calendar())
+    # Получаем обновленные заблокированные дни
+    blocked_days = await get_all_blocked_days()
+    blocked_dict = {d["date"]: d["reason"] for d in blocked_days}
+    
+    await callback.message.edit_text(
+        "Выберите дату:", 
+        reply_markup=create_calendar(
+            datetime.now().year, 
+            datetime.now().month, 
+            blocked_dict,
+            for_patient=True
+        )
+    )
     await state.set_state(BookingStates.waiting_for_date)
 
 @router.message(BookingStates.waiting_for_phone)
@@ -119,6 +171,17 @@ async def confirm_booking(event, state: FSMContext):
     data = await state.get_data()
     slot_id = data["slot_id"]
     selected_date = data["selected_date"]
+    
+    # Дополнительная проверка на блокировку (на случай, если заблокировали в процессе)
+    blocked = await get_blocked_day(selected_date)
+    if blocked:
+        await event.answer(
+            "❌ Извините, этот день был заблокирован.\n"
+            "Пожалуйста, выберите другую дату.",
+            reply_markup=patient_main_menu()
+        )
+        await state.clear()
+        return
     
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -241,7 +304,6 @@ async def cancel_appointment(callback: CallbackQuery):
     success = await cancel_slot(slot_id, patient_id)
 
     if success:
-        # ✅ ВСЁ В ЧАТ: новое сообщение + удаляем старое
         await callback.message.answer("✅ Запись отменена. Слот освобожден.")
         await callback.message.delete()
         await callback.answer()

@@ -34,6 +34,16 @@ async def init_db():
             )
         """)
 
+        # ✅ НОВАЯ ТАБЛИЦА: заблокированные дни с причинами
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_days (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_date DATE UNIQUE,
+                reason TEXT,
+                comment TEXT
+            )
+        """)
+
         await db.commit()
 
     await generate_test_slots()
@@ -173,3 +183,37 @@ async def get_free_times(date_str: str):
             ORDER BY slot_time
         """, (date_str,))
         return await cursor.fetchall()
+
+# ✅ НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ЗАБЛОКИРОВАННЫМИ ДНЯМИ
+
+async def block_day(date_str: str, reason: str, comment: str = ""):
+    """Заблокировать день с указанием причины"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO blocked_days (block_date, reason, comment)
+            VALUES (?, ?, ?)
+        """, (date_str, reason, comment))
+        await db.commit()
+
+async def unblock_day(date_str: str):
+    """Разблокировать день"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM blocked_days WHERE block_date = ?", (date_str,))
+        await db.commit()
+
+async def get_blocked_day(date_str: str):
+    """Получить информацию о заблокированном дне"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT reason, comment FROM blocked_days WHERE block_date = ?",
+            (date_str,)
+        )
+        row = await cursor.fetchone()
+        return {"reason": row[0], "comment": row[1]} if row else None
+
+async def get_all_blocked_days():
+    """Получить все заблокированные дни"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT block_date, reason, comment FROM blocked_days ORDER BY block_date")
+        rows = await cursor.fetchall()
+        return [{"date": row[0], "reason": row[1], "comment": row[2]} for row in rows]

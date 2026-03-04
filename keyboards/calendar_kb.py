@@ -2,7 +2,14 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime
 import calendar
 
-def create_calendar(year: int = None, month: int = None):
+def create_calendar(year: int = None, month: int = None, status_dict: dict = None, for_patient: bool = False):
+    """
+    Создает календарь с возможностью подсветки статусов дней
+    :param year: год
+    :param month: месяц
+    :param status_dict: словарь {дата: статус/причина}
+    :param for_patient: True для клиента, False для админа
+    """
     if not year:
         year = datetime.now().year
     if not month:
@@ -37,9 +44,31 @@ def create_calendar(year: int = None, month: int = None):
                 week_row.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
             else:
                 date_str = f"{year}-{month:02d}-{day:02d}"
+                
+                # Определяем эмодзи для кнопки
+                emoji = ""
+                if status_dict and date_str in status_dict:
+                    reason = status_dict[date_str]
+                    
+                    if for_patient:
+                        # Для клиента — понятные эмодзи
+                        if reason == "Отпуск":
+                            emoji = "🏖 "
+                        elif reason == "Больничный":
+                            emoji = "🤒 "
+                        elif reason == "Ремонт":
+                            emoji = "🛠 "
+                        elif reason == "Выходной":
+                            emoji = "📅 "
+                        else:
+                            emoji = "🚫 "
+                    else:
+                        # Для админа — просто замок
+                        emoji = "🔒 "
+                
                 week_row.append(
                     InlineKeyboardButton(
-                        text=str(day), 
+                        text=f"{emoji}{day}",
                         callback_data=f"date_{date_str}"
                     )
                 )
