@@ -55,24 +55,45 @@ async def init_db():
 
         await db.commit()
 
-    await generate_test_slots()
+    await generate_future_slots()  # ✅ Генерируем слоты по расписанию
     await fix_broken_bookings()
 
-async def generate_test_slots():
-    """Генерация тестовых слотов"""
+async def generate_future_slots(days_ahead: int = 30):
+    """Генерация слотов на будущие дни по расписанию из working_hours"""
     async with aiosqlite.connect(DB_PATH) as db:
         from datetime import datetime, timedelta
         
+        # Получаем настройки расписания
+        working_hours = await get_all_working_hours()
+        
+        if not working_hours:
+            print("⚠️ Расписание не настроено. Слоты не созданы.")
+            return
+        
+        # Маппинг дней недели (0=пн, 1=вт, 2=ср, 3=чт, 4=пт)
+        day_map = {
+            0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"
+        }
+        
         start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
-        for day in range(0, 15):
-            current_date = start_date + timedelta(days=day)
+        # ✅ ИСПРАВЛЕНО: начинаем с 0 (сегодня)
+        for day_offset in range(0, days_ahead):
+            current_date = start_date + timedelta(days=day_offset)
+            weekday = current_date.weekday()
             date_str = current_date.strftime("%Y-%m-%d")
             
-            if current_date.weekday() >= 5:
-                continue
+            # Проверяем, есть ли настройки для этого дня недели
+            day_code = day_map.get(weekday)
+            if not day_code or day_code not in working_hours:
+                continue  # нет настроек для этого дня (например, суббота/воскресенье)
             
-            for hour in range(10, 15):
+            # Получаем часы работы
+            start_hour = int(working_hours[day_code]['start'])
+            end_hour = int(working_hours[day_code]['end'])
+            
+            # ✅ ИСПРАВЛЕНО: +1 чтобы включить последний час
+            for hour in range(start_hour, end_hour + 1):
                 time_str = f"{hour:02d}:00"
                 await db.execute("""
                     INSERT OR IGNORE INTO slots (slot_date, slot_time, status)
@@ -80,6 +101,7 @@ async def generate_test_slots():
                 """, (date_str, time_str))
         
         await db.commit()
+        print(f"✅ Созданы слоты на {days_ahead} дней вперёд по расписанию")
 
 async def fix_broken_bookings():
     """Исправляет битые записи при запуске"""
@@ -193,7 +215,9 @@ async def get_free_times(date_str: str):
         """, (date_str,))
         return await cursor.fetchall()
 
-# ✅ НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ЗАБЛОКИРОВАННЫМИ ДНЯМИ
+# ============================================
+# ✅ ФУНКЦИИ ДЛЯ РАБОТЫ С ЗАБЛОКИРОВАННЫМИ ДНЯМИ
+# ============================================
 
 async def block_day(date_str: str, reason: str, comment: str = ""):
     """Заблокировать день с указанием причины"""
@@ -228,7 +252,7 @@ async def get_all_blocked_days():
         return [{"date": row[0], "reason": row[1], "comment": row[2]} for row in rows]
 
 # ============================================
-# ✅ НОВЫЕ ФУНКЦИИ ДЛЯ РАБОЧИХ ЧАСОВ (WORKING HOURS)
+# ✅ ФУНКЦИИ ДЛЯ РАБОЧИХ ЧАСОВ (WORKING HOURS)
 # ============================================
 
 async def save_working_hours(day: str, start_hour: str, end_hour: str):

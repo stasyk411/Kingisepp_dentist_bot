@@ -4,7 +4,11 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, timedelta
 
-from database import DB_PATH, block_day, get_all_blocked_days, get_all_working_hours, get_working_hours
+from database import (
+    DB_PATH, block_day, get_all_blocked_days,
+    get_all_working_hours, get_working_hours,
+    generate_future_slots  # ✅ Добавлен импорт
+)
 from keyboards.admin_kb import admin_main_menu
 from keyboards.calendar_kb import create_calendar
 from keyboards.inline_kb import days_keyboard, hours_start_keyboard, hours_end_keyboard
@@ -393,6 +397,9 @@ async def select_end_hour(callback: CallbackQuery, is_admin: bool):
             VALUES (?, ?, ?)
         """, (day, start, hour))
         await db.commit()
+    
+    # ✅ Генерируем слоты заново после изменения расписания
+    await generate_future_slots()
     
     # Получаем название дня
     days_ru = {
