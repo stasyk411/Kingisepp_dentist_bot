@@ -70,6 +70,13 @@ async def generate_future_slots(days_ahead: int = 30):
             print("⚠️ Расписание не настроено. Слоты не созданы.")
             return
         
+        # ✅ УДАЛЯЕМ все будущие свободные слоты (чтобы не копились)
+        await db.execute("""
+            DELETE FROM slots 
+            WHERE slot_date >= date('now') 
+            AND status = 'free'
+        """)
+        
         # Маппинг дней недели (0=пн, 1=вт, 2=ср, 3=чт, 4=пт)
         day_map = {
             0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"
