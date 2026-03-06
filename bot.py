@@ -7,7 +7,8 @@ from config import BOT_TOKEN, ADMIN_IDS
 from database import init_db
 from handlers import patient, admin, common
 from middlewares.role_check import RoleCheckMiddleware
-from scheduler.backup import send_backup  # ✅ Добавлено
+from scheduler.backup import send_backup
+from scheduler.reminders import start_scheduler  # ✅ ИСПРАВЛЕНО
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +29,9 @@ async def main():
             kwargs={'bot': bot, 'admin_id': ADMIN_IDS[0]}
         )
         logging.info("✅ Запланирован еженедельный бэкап (воскресенье 20:00)")
+    
+    # ✅ ЗАПУСК ПЛАНИРОВЩИКА НАПОМИНАНИЙ
+    await start_scheduler()
     
     scheduler.start()
     dp["scheduler"] = scheduler
