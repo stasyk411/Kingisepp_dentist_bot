@@ -299,15 +299,8 @@ async def cancel_appointment(callback: CallbackQuery):
             await callback.answer()
             return
         
-        appointment_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-
-        if appointment_time - datetime.now() < timedelta(hours=24):
-            await callback.message.answer(
-                "❌ Отменить можно не позднее чем за 24 часа до приема.\n"
-                f"Позвоните врачу: +7 (911) 775-04-24"
-            )
-            await callback.answer()
-            return
+        # ✅ УБРАЛИ ПРОВЕРКУ НА 24 ЧАСА
+        # Клиент может отменить в любой момент
 
     success = await cancel_slot(slot_id, patient_id)
 
