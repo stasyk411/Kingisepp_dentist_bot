@@ -275,7 +275,7 @@ async def get_slots_for_reminder() -> list:
     Возвращает слоты, для которых нужно отправить напоминание:
     - статус 'booked'
     - reminder_sent = 0
-    - прошло ровно 24 часа (±5 минут) с момента записи
+    - до начала приёма осталось ровно 24 часа (±5 минут)
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
@@ -283,9 +283,9 @@ async def get_slots_for_reminder() -> list:
             FROM slots 
             WHERE status = 'booked' 
             AND reminder_sent = 0
-            AND datetime(booked_at, '+24 hours') 
-    BETWEEN datetime('now', '-10 minutes') 
-    AND datetime('now', '+10 minutes')
+            AND datetime(slot_date || ' ' || slot_time, '-24 hours') 
+                BETWEEN datetime('now', '-5 minutes') 
+                AND datetime('now', '+5 minutes')
         """)
         rows = await cursor.fetchall()
         
