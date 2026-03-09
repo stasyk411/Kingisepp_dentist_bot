@@ -102,8 +102,14 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
     
     await state.update_data(selected_date=date_str)
 
+    # Получаем свободные слоты
     free_times = await get_free_times(date_str)
-
+    
+    # 🔥 ОТЛАДКА (временная)
+    print(f"\n🔥 ДАТА: {date_str}")
+    print(f"🔥 СЛОТЫ: {free_times}")
+    print(f"🔥 КОЛИЧЕСТВО: {len(free_times) if free_times else 0}")
+    
     if not free_times:
         await callback.message.answer(
             "❌ На эту дату нет свободных слотов.\n"
