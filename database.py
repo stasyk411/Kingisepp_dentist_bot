@@ -132,14 +132,16 @@ async def book_slot(slot_id: int, patient_id: int, selected_date: str) -> bool:
                 await db.rollback()
                 return False
             
+            # ✅ ИСПРАВЛЕНО: проверяем только будущие записи
             cursor = await db.execute("""
                 SELECT id FROM slots 
                 WHERE patient_id = ? AND status = 'booked'
+                AND slot_date >= date('now')
             """, (patient_id,))
             existing = await cursor.fetchone()
             
             if existing:
-                print(f"❌ У пациента уже есть активная запись (id={existing[0]})")
+                print(f"❌ У пациента уже есть активная запись на будущее (id={existing[0]})")
                 await db.rollback()
                 return False
             
