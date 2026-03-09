@@ -46,8 +46,9 @@ def setup_test_data():
     cursor.execute("SELECT id FROM patients WHERE telegram_id = 999999")
     patient_id = cursor.fetchone()[0]
     
-    # Создаём тестовый слот с booked_at 24 часа назад
-    booked_at = (datetime.now() - timedelta(hours=24, seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+    # ✅ ИСПРАВЛЕНО: booked_at = время слота - 24 часа
+    slot_datetime = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0) + timedelta(days=1)
+booked_at = (slot_datetime - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     
     cursor.execute("""
         INSERT OR REPLACE INTO slots 
@@ -67,7 +68,7 @@ def setup_test_data():
     
     print("✅ Тестовые данные созданы")
     print(f"   Пациент ID: {patient_id}, Telegram: 999999")
-    print("   Слот: 2026-03-07 15:00 (забронирован 24 часа назад)")
+    print(f"   Слот: 2026-03-07 15:00 (booked_at: {booked_at})")
 
 def cleanup_test_data():
     """Удаляет тестовые данные"""
@@ -151,7 +152,7 @@ async def test_mark_sent():
     if sent == 1:
         print("✅ Напоминание отмечено как отправленное")
     else:
-        print("❌ Ошибка: reminder_sent = {sent}")
+        print(f"❌ Ошибка: reminder_sent = {sent}")
 
 async def test_check_reminders():
     """Тест 4: Запуск планировщика"""
@@ -176,6 +177,15 @@ async def test_full_cycle():
     
     if not slots:
         print("❌ Слоты не найдены. Проверь booked_at")
+        print("\n🔍 СОДЕРЖИМОЕ БД:")
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, slot_date, slot_time, booked_at, reminder_sent FROM slots WHERE slot_date = '2026-03-07'")
+        rows = cursor.fetchall()
+        for row in rows:
+            print(f"   ID: {row[0]}, слот: {row[1]} {row[2]}, booked_at: {row[3]}, sent: {row[4]}")
+        conn.close()
+        
         cleanup_test_data()
         return False
     

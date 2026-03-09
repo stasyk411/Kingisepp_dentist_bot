@@ -267,12 +267,15 @@ async def get_all_working_hours():
         return result
 
 # ============================================
-# НАПОМИНАНИЯ — ФИНАЛЬНАЯ ВЕРСИЯ (БЕЗ УСЛОВИЯ ПО ВРЕМЕНИ)
+# НАПОМИНАНИЯ — ИСПРАВЛЕННАЯ ВЕРСИЯ (ЗА 24 ЧАСА)
 # ============================================
 
 async def get_slots_for_reminder() -> list:
     """
-    Возвращает ВСЕ слоты, которым ещё не отправили напоминание
+    Возвращает слоты, для которых нужно отправить напоминание:
+    - статус 'booked'
+    - reminder_sent = 0
+    - прошло ровно 24 часа (±5 минут) с момента записи
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
@@ -280,6 +283,9 @@ async def get_slots_for_reminder() -> list:
             FROM slots 
             WHERE status = 'booked' 
             AND reminder_sent = 0
+            AND datetime(booked_at, '+24 hours') 
+    BETWEEN datetime('now', '-10 minutes') 
+    AND datetime('now', '+10 minutes')
         """)
         rows = await cursor.fetchall()
         
