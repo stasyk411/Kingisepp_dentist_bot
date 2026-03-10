@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from database import (
     DB_PATH, block_day, get_all_blocked_days,
     get_all_working_hours, get_working_hours,
-    generate_future_slots  # ✅ Добавлен импорт
+    generate_future_slots  # ИСПРАВЛЕНО: generate_test_slots → generate_future_slots
 )
 from keyboards.admin_kb import admin_main_menu
 from keyboards.calendar_kb import create_calendar
@@ -390,7 +390,7 @@ async def select_end_hour(callback: CallbackQuery, is_admin: bool):
     day = user_settings[user_id].get("day", "")
     start = user_settings[user_id].get("start", "")
     
-    # Сохраняем в БД (таблица уже существует в database.py)
+    # Сохраняем в БД
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR REPLACE INTO working_hours (day, start_hour, end_hour)
@@ -398,8 +398,8 @@ async def select_end_hour(callback: CallbackQuery, is_admin: bool):
         """, (day, start, hour))
         await db.commit()
     
-    # ✅ Генерируем слоты заново после изменения расписания
-    await generate_future_slots()
+    # Генерируем слоты заново после изменения расписания
+    await generate_future_slots()  # ИСПРАВЛЕНО: generate_test_slots → generate_future_slots
     
     # Получаем название дня
     days_ru = {
@@ -450,5 +450,3 @@ async def settings_done(callback: CallbackQuery, is_admin: bool):
     
     await callback.message.delete()
     await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
-
-# Удаляем старый хендлер "🔓 Освободить" (больше не нужен)
