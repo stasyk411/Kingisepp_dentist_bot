@@ -2,6 +2,8 @@ import aiosqlite
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from datetime import datetime, timedelta
 
 from database import (
@@ -15,6 +17,13 @@ from keyboards.inline_kb import days_keyboard, hours_start_keyboard, hours_end_k
 from utils.logger import logger
 
 router = Router()
+
+# -------------------- СОСТОЯНИЯ FSM ДЛЯ НАСТРОЕК --------------------
+
+class SettingsStates(StatesGroup):
+    choosing_day = State()      # выбрали день
+    choosing_start = State()    # выбрали начало
+    # choosing_end не нужен - там сразу сохранение
 
 # -------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------------------
 
@@ -262,7 +271,6 @@ async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
         await db.commit()
     
     # Отправляем уведомления пациентам
-       # Отправляем уведомления пациентам
     success_count = 0
     fail_count = 0
     
@@ -347,15 +355,17 @@ async def back_to_admin(callback: CallbackQuery, is_admin: bool):
     await callback.message.delete()
     await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
 
-# -------------------- НОВЫЕ ХЕНДЛЕРЫ НАСТРОЕК --------------------
+# -------------------- НОВЫЕ ХЕНДЛЕРЫ НАСТРОЕК С FSM --------------------
 
-# Словарь для хранения временных данных настройки (в реальном проекте лучше использовать FSM)
-user_settings = {}
+# Удален глобальный словарь user_settings
 
 @router.message(F.text == "⚙️ Настройки")
-async def settings_start(message: Message, is_admin: bool):
+async def settings_start(message: Message, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
+    
+    # Очищаем предыдущее состояние
+    await state.clear()
     
     # Получаем текущие настройки из БД
     settings = await get_all_working_hours()
@@ -375,17 +385,14 @@ async def settings_start(message: Message, is_admin: bool):
     await message.answer(text, reply_markup=days_keyboard())
 
 @router.callback_query(F.data.startswith("day_"))
-async def select_day(callback: CallbackQuery, is_admin: bool):
+async def select_day(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
     
     day = callback.data.split("_")[1]
-    user_id = callback.from_user.id
     
-    # Сохраняем выбранный день
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]["day"] = day
+    # Сохраняем выбранный день в FSM
+    await state.update_data(day=day)
     
     # Получаем текущее название дня
     days_ru = {
@@ -414,7 +421,8 @@ async def select_day(callback: CallbackQuery, is_admin: bool):
             reply_markup=kb.as_markup()
         )
     else:
-        # Если не настроен — сразу к выбору часов
+        # Если не настроен — переходим к выбору часов и устанавливаем состояние
+        await state.set_state(SettingsStates.choosing_start)
         await callback.message.edit_text(
             f"⚙️ {day_name}\n\n"
             f"Выберите время начала работы:",
@@ -422,17 +430,14 @@ async def select_day(callback: CallbackQuery, is_admin: bool):
         )
 
 @router.callback_query(F.data.startswith("edit_day_"))
-async def edit_day(callback: CallbackQuery, is_admin: bool):
+async def edit_day(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
     
     day = callback.data.split("_")[2]
-    user_id = callback.from_user.id
     
-    # Сохраняем выбранный день (для изменения)
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]["day"] = day
+    # Сохраняем выбранный день в FSM
+    await state.update_data(day=day)
     
     # Получаем название дня
     days_ru = {
@@ -443,6 +448,9 @@ async def edit_day(callback: CallbackQuery, is_admin: bool):
         "fri": "Пятница"
     }
     day_name = days_ru.get(day, day)
+    
+    # Устанавливаем состояние выбора начала
+    await state.set_state(SettingsStates.choosing_start)
     
     await callback.message.edit_text(
         f"⚙️ {day_name} (изменение)\n\n"
@@ -450,21 +458,21 @@ async def edit_day(callback: CallbackQuery, is_admin: bool):
         reply_markup=hours_start_keyboard()
     )
 
-@router.callback_query(F.data.startswith("hour_start_"))
-async def select_start_hour(callback: CallbackQuery, is_admin: bool):
+@router.callback_query(SettingsStates.choosing_start, F.data.startswith("hour_start_"))
+async def select_start_hour(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
     
     hour = callback.data.split("_")[2]
-    user_id = callback.from_user.id
     
-    # Сохраняем выбранный час начала
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]["start"] = hour
+    # Сохраняем выбранный час начала в FSM
+    await state.update_data(start=hour)
+    
+    # Получаем данные из FSM
+    data = await state.get_data()
+    day = data.get("day", "")
     
     # Получаем название дня
-    day = user_settings[user_id].get("day", "")
     days_ru = {
         "mon": "Понедельник",
         "tue": "Вторник",
@@ -473,6 +481,8 @@ async def select_start_hour(callback: CallbackQuery, is_admin: bool):
         "fri": "Пятница"
     }
     day_name = days_ru.get(day, day)
+    
+    # Оставляем состояние (не меняем) - пользователь должен выбрать окончание
     
     await callback.message.edit_text(
         f"⚙️ {day_name}\n"
@@ -481,22 +491,17 @@ async def select_start_hour(callback: CallbackQuery, is_admin: bool):
         reply_markup=hours_end_keyboard(hour)
     )
 
-@router.callback_query(F.data.startswith("hour_end_"))
-async def select_end_hour(callback: CallbackQuery, is_admin: bool):
+@router.callback_query(SettingsStates.choosing_start, F.data.startswith("hour_end_"))
+async def select_end_hour(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
     
     hour = callback.data.split("_")[2]
-    user_id = callback.from_user.id
     
-    # Сохраняем выбранный час окончания
-    if user_id not in user_settings:
-        user_settings[user_id] = {}
-    user_settings[user_id]["end"] = hour
-    
-    # Получаем данные
-    day = user_settings[user_id].get("day", "")
-    start = user_settings[user_id].get("start", "")
+    # Получаем все данные из FSM
+    data = await state.get_data()
+    day = data.get("day", "")
+    start = data.get("start", "")
     
     # Сохраняем в БД
     async with aiosqlite.connect(DB_PATH) as db:
@@ -519,20 +524,23 @@ async def select_end_hour(callback: CallbackQuery, is_admin: bool):
     }
     day_name = days_ru.get(day, day)
     
+    # Очищаем состояние
+    await state.clear()
+    
     await callback.message.edit_text(
         f"✅ {day_name}: {start}:00 — {hour}:00\n\n"
         f"Настройка сохранена.",
         reply_markup=days_keyboard()
     )
-    
-    # Очищаем временные данные
-    if user_id in user_settings:
-        del user_settings[user_id]
 
+# Обработчик для кнопки "Назад" в настройках
 @router.callback_query(F.data == "back_to_days")
-async def back_to_days(callback: CallbackQuery, is_admin: bool):
+async def back_to_days(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
+    
+    # Очищаем состояние
+    await state.clear()
     
     # Получаем обновленные настройки
     settings = await get_all_working_hours()
@@ -552,9 +560,12 @@ async def back_to_days(callback: CallbackQuery, is_admin: bool):
     await callback.message.edit_text(text, reply_markup=days_keyboard())
 
 @router.callback_query(F.data == "settings_done")
-async def settings_done(callback: CallbackQuery, is_admin: bool):
+async def settings_done(callback: CallbackQuery, is_admin: bool, state: FSMContext):
     if not is_admin:
         return
+    
+    # Очищаем состояние на всякий случай
+    await state.clear()
     
     await callback.message.delete()
     await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
