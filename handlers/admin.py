@@ -1,5 +1,5 @@
 import aiosqlite
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, timedelta
@@ -7,13 +7,69 @@ from datetime import datetime, timedelta
 from database import (
     DB_PATH, block_day, get_all_blocked_days,
     get_all_working_hours, get_working_hours,
-    generate_future_slots  # ИСПРАВЛЕНО: generate_test_slots → generate_future_slots
+    generate_future_slots, get_patient_telegram_by_slot
 )
 from keyboards.admin_kb import admin_main_menu
 from keyboards.calendar_kb import create_calendar
 from keyboards.inline_kb import days_keyboard, hours_start_keyboard, hours_end_keyboard
+from utils.logger import logger
 
 router = Router()
+
+# -------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------------------
+
+async def notify_patients_about_cancellation(bot: Bot, date_str: str, reason: str):
+    """Уведомляет всех пациентов об отмене дня"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Получаем всех пациентов, записанных на этот день
+        cursor = await db.execute("""
+            SELECT s.id, p.telegram_id, s.slot_time, p.name
+            FROM slots s
+            JOIN patients p ON s.patient_id = p.id
+            WHERE s.slot_date = ? AND s.status = 'booked'
+        """, (date_str,))
+        patients = await cursor.fetchall()
+    
+    if not patients:
+        logger.info(f"Нет пациентов для уведомления об отмене {date_str}")
+        return
+    
+    # Отправляем уведомление каждому пациенту
+    success_count = 0
+    fail_count = 0
+    
+    # Форматируем дату для красивого отображения
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    pretty_date = date_obj.strftime("%d.%m.%Y")
+    
+    for slot_id, telegram_id, slot_time, patient_name in patients:
+        try:
+            text = (
+                f"⚠️ <b>ВНИМАНИЕ! Приём отменён</b>\n\n"
+                f"🦷 Уважаемый(ая) {patient_name},\n\n"
+                f"К сожалению, ваш приём на <b>{pretty_date} в {slot_time}</b> "
+                f"отменяется по причине: <b>{reason}</b>.\n\n"
+                f"📞 Для записи на другое время свяжитесь с администратором "
+                f"или выберите новую дату в боте.\n\n"
+                f"Приносим извинения за доставленные неудобства!"
+            )
+            
+            await bot.send_message(telegram_id, text)
+            success_count += 1
+            logger.info(f"Уведомление об отмене отправлено", extra={
+                "patient_id": telegram_id,
+                "slot_id": slot_id,
+                "date": date_str,
+                "time": slot_time
+            })
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Ошибка отправки уведомления об отмене", extra={
+                "patient_id": telegram_id,
+                "error": str(e)
+            })
+    
+    return success_count, fail_count
 
 # -------------------- СУЩЕСТВУЮЩИЕ ХЕНДЛЕРЫ --------------------
 
@@ -144,8 +200,7 @@ async def cancel_day_confirm(callback: CallbackQuery, is_admin: bool):
         f"Вы собираетесь отменить день {date_str}.\n\n"
         f"Записано пациентов: {len(patients)}\n"
         f"{patients_list}\n\n"
-        f"❌ Автоматические уведомления НЕ отправляются.\n"
-        f"📞 Вы должны обзвонить этих пациентов самостоятельно.\n\n"
+        f"ℹ️ <b>Автоматические уведомления</b> будут отправлены всем пациентам.\n"
         f"Подтвердите действие:",
         reply_markup=kb.as_markup()
     )
@@ -166,7 +221,7 @@ async def ask_reason(callback: CallbackQuery, date_str: str):
     )
 
 @router.callback_query(F.data.startswith("reason_"))
-async def save_reason(callback: CallbackQuery, is_admin: bool):
+async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
     if not is_admin:
         return
     
@@ -187,6 +242,16 @@ async def save_reason(callback: CallbackQuery, is_admin: bool):
     # Сохраняем в blocked_days
     await block_day(date_str, reason_text, "")
     
+    # Получаем список пациентов ДО обновления статуса
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT p.telegram_id, s.slot_time, p.name
+            FROM slots s
+            JOIN patients p ON s.patient_id = p.id
+            WHERE s.slot_date = ? AND s.status = 'booked'
+        """, (date_str,))
+        patients_to_notify = await cursor.fetchall()
+    
     # Обновляем статус в slots
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -196,10 +261,53 @@ async def save_reason(callback: CallbackQuery, is_admin: bool):
         """, (date_str,))
         await db.commit()
     
-    await callback.message.edit_text(
-        f"✅ День {date_str} заблокирован.\n"
-        f"Причина: {reason_text}"
-    )
+    # Отправляем уведомления пациентам
+       # Отправляем уведомления пациентам
+    success_count = 0
+    fail_count = 0
+    
+    if patients_to_notify:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        pretty_date = date_obj.strftime("%d.%m.%Y")
+        
+        for telegram_id, slot_time, patient_name in patients_to_notify:
+            try:
+                text = (
+                    f"⚠️ ВНИМАНИЕ! Приём отменён\n\n"
+                    f"Уважаемый(ая) {patient_name},\n\n"
+                    f"К сожалению, ваш приём на {pretty_date} в {slot_time} "
+                    f"отменяется по причине: {reason_text}.\n\n"
+                    f"Для записи на другое время позвоните по телефону: +7 (911) 775-04-24 (Голосовская Светлана Алексеевна)\n\n"
+                    f"или выберите новую дату в боте.\n\n"
+                    f"Приносим извинения за неудобства!"
+                )
+                
+                await bot.send_message(telegram_id, text)
+                success_count += 1
+                logger.info(f"Уведомление об отмене отправлено", extra={
+                    "patient_id": telegram_id,
+                    "date": date_str,
+                    "time": slot_time,
+                    "reason": reason_text
+                })
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"Ошибка отправки уведомления", extra={
+                    "patient_id": telegram_id,
+                    "error": str(e)
+                })
+    
+    # Формируем ответ админу
+    result_text = f"✅ День {date_str} заблокирован.\nПричина: {reason_text}\n\n"
+    
+    if patients_to_notify:
+        result_text += f"📨 Уведомления отправлены: {success_count} пациентам"
+        if fail_count > 0:
+            result_text += f"\n❌ Не удалось отправить: {fail_count}"
+    else:
+        result_text += "📭 Записей на этот день не было."
+    
+    await callback.message.edit_text(result_text)
 
 @router.callback_query(F.data.startswith("confirm_cancel_"))
 async def cancel_day_execute(callback: CallbackQuery, is_admin: bool):
@@ -399,7 +507,7 @@ async def select_end_hour(callback: CallbackQuery, is_admin: bool):
         await db.commit()
     
     # Генерируем слоты заново после изменения расписания
-    await generate_future_slots()  # ИСПРАВЛЕНО: generate_test_slots → generate_future_slots
+    await generate_future_slots()
     
     # Получаем название дня
     days_ru = {
