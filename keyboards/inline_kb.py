@@ -27,6 +27,16 @@ def create_time_keyboard(times: list):
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+def create_confirmation_keyboard():
+    """Создает клавиатуру подтверждения записи"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_booking"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_confirmation")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 def days_keyboard():
     """Клавиатура для выбора дня недели (настройки)"""
     builder = InlineKeyboardBuilder()

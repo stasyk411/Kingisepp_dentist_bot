@@ -343,3 +343,109 @@ async def get_patient_telegram_by_slot(slot_id: int) -> int:
         """, (slot_id,))
         row = await cursor.fetchone()
         return row[0] if row else None
+
+# ============= ВРЕМЕННЫЕ БЛОКИРОВКИ =============
+
+async def create_temp_booking(slot_date: str, slot_time: str, user_id: int, minutes: int = 10):
+    """
+    Создать временную блокировку слота
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        expires_at = datetime.now() + timedelta(minutes=minutes)
+        
+        # Удаляем старые блокировки этого пользователя (если были)
+        await db.execute("""
+            DELETE FROM temp_bookings 
+            WHERE user_id = ? AND expires_at > datetime('now')
+        """, (user_id,))
+        
+        # Создаем новую блокировку
+        cursor = await db.execute("""
+            INSERT INTO temp_bookings (slot_date, slot_time, user_id, expires_at)
+            VALUES (?, ?, ?, ?)
+        """, (slot_date, slot_time, user_id, expires_at.isoformat()))
+        
+        await db.commit()
+        
+        # Удаляем старые истекшие блокировки
+        await cleanup_expired_temp_bookings()
+        
+        return cursor.lastrowid
+
+async def check_temp_booking(slot_date: str, slot_time: str) -> bool:
+    """
+    Проверить, есть ли активная временная блокировка на слот
+    Возвращает True если слот временно заблокирован
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Удаляем просроченные блокировки
+        await db.execute("""
+            DELETE FROM temp_bookings 
+            WHERE expires_at < datetime('now')
+        """)
+        await db.commit()
+        
+        # Проверяем активные блокировки
+        cursor = await db.execute("""
+            SELECT COUNT(*) FROM temp_bookings 
+            WHERE slot_date = ? AND slot_time = ? 
+            AND expires_at > datetime('now')
+        """, (slot_date, slot_time))
+        
+        count = (await cursor.fetchone())[0]
+        return count > 0
+
+async def get_user_temp_booking(user_id: int):
+    """
+    Получить текущую временную блокировку пользователя
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Удаляем просроченные
+        await db.execute("DELETE FROM temp_bookings WHERE expires_at < datetime('now')")
+        await db.commit()
+        
+        cursor = await db.execute("""
+            SELECT slot_date, slot_time, expires_at FROM temp_bookings 
+            WHERE user_id = ? AND expires_at > datetime('now')
+            ORDER BY created_at DESC LIMIT 1
+        """, (user_id,))
+        
+        row = await cursor.fetchone()
+        if row:
+            return {
+                'slot_date': row[0],
+                'slot_time': row[1],
+                'expires_at': row[2]
+            }
+        return None
+
+async def delete_temp_booking(slot_date: str, slot_time: str):
+    """
+    Удалить временную блокировку (при подтверждении записи)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            DELETE FROM temp_bookings 
+            WHERE slot_date = ? AND slot_time = ?
+        """, (slot_date, slot_time))
+        await db.commit()
+
+async def cleanup_expired_temp_bookings():
+    """
+    Очистить все просроченные временные блокировки
+    Запускается автоматически или по расписанию
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM temp_bookings WHERE expires_at < datetime('now')")
+        await db.commit()
+
+async def get_expired_temp_bookings():
+    """
+    Получить список просроченных блокировок (для отладки)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT * FROM temp_bookings 
+            WHERE expires_at < datetime('now')
+        """)
+        return await cursor.fetchall()

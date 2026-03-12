@@ -5,10 +5,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timedelta
 
-from database import DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, get_free_times, get_blocked_day, get_all_blocked_days
+from database import (
+    DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, 
+    get_free_times, get_blocked_day, get_all_blocked_days,
+    create_temp_booking, check_temp_booking, get_user_temp_booking, delete_temp_booking
+)
 from keyboards.patient_kb import patient_main_menu
 from keyboards.calendar_kb import create_calendar
-from keyboards.inline_kb import create_time_keyboard
+from keyboards.inline_kb import create_time_keyboard, create_confirmation_keyboard
 from utils.validators import clean_phone, is_valid_phone
 
 router = Router()
@@ -17,6 +21,7 @@ class BookingStates(StatesGroup):
     waiting_for_date = State()
     waiting_for_time = State()
     waiting_for_phone = State()
+    waiting_for_confirmation = State()  # Новый state для подтверждения
 
 @router.message(F.text == "📝 Записаться")
 async def start_booking(message: Message, state: FSMContext):
@@ -105,11 +110,6 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
     # Получаем свободные слоты
     free_times = await get_free_times(date_str)
     
-    # 🔥 ОТЛАДКА (временная)
-    print(f"\n🔥 ДАТА: {date_str}")
-    print(f"🔥 СЛОТЫ: {free_times}")
-    print(f"🔥 КОЛИЧЕСТВО: {len(free_times) if free_times else 0}")
-    
     if not free_times:
         await callback.message.answer(
             "❌ На эту дату нет свободных слотов.\n"
@@ -126,21 +126,83 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(BookingStates.waiting_for_time, F.data.startswith("time_"))
 async def time_selected(callback: CallbackQuery, state: FSMContext):
     slot_id = int(callback.data.split("_")[1])
-    await state.update_data(slot_id=slot_id)
-
+    
+    # Получаем дату и время слота
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT slot_date, slot_time FROM slots WHERE id = ?", 
+            (slot_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            await callback.message.answer("❌ Ошибка: слот не найден")
+            await callback.answer()
+            return
+        
+        slot_date, slot_time = row
+    
+    # Проверяем, не заблокирован ли слот временно
+    is_temp_booked = await check_temp_booking(slot_date, slot_time)
+    if is_temp_booked:
+        await callback.message.answer(
+            "❌ К сожалению, это время только что выбрал другой пациент.\n"
+            "Пожалуйста, выберите другое время."
+        )
+        await callback.answer()
+        return
+    
+    # Создаем временную блокировку на 10 минут
+    temp_id = await create_temp_booking(
+        slot_date, 
+        slot_time, 
+        callback.from_user.id, 
+        minutes=10
+    )
+    
+    if not temp_id:
+        await callback.message.answer(
+            "❌ Ошибка при бронировании времени.\n"
+            "Попробуйте ещё раз."
+        )
+        await callback.answer()
+        return
+    
+    # Сохраняем данные
+    await state.update_data(
+        slot_id=slot_id,
+        slot_date=slot_date,
+        slot_time=slot_time,
+        temp_id=temp_id
+    )
+    
+    # Проверяем, есть ли телефон у пациента
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT phone FROM patients WHERE telegram_id = ?", 
             (callback.from_user.id,)
         )
         patient = await cursor.fetchone()
-
+    
+    # Показываем экран подтверждения с таймером
+    expires_at = datetime.now() + timedelta(minutes=10)
+    time_str = expires_at.strftime("%H:%M:%S")
+    
     if patient and patient[0]:
-        await confirm_booking(callback, state)
-    else:
+        # Телефон есть - сразу показываем подтверждение
         await callback.message.edit_text(
-            "📱 Введите ваш номер телефона для связи\n"
-            "(например: +79001234567)", 
+            f"📅 {slot_date} в {slot_time}\n\n"
+            f"⏳ Время на подтверждение: до {time_str}\n\n"
+            f"Подтвердите запись:",
+            reply_markup=create_confirmation_keyboard()
+        )
+        await state.set_state(BookingStates.waiting_for_confirmation)
+    else:
+        # Телефона нет - сначала просим телефон
+        await callback.message.edit_text(
+            f"📅 {slot_date} в {slot_time}\n\n"
+            f"📱 Введите ваш номер телефона для связи\n"
+            f"(например: +79001234567)\n\n"
+            f"⏳ Время на подтверждение: до {time_str}",
             reply_markup=None
         )
         await state.set_state(BookingStates.waiting_for_phone)
@@ -171,14 +233,56 @@ async def phone_entered(message: Message, state: FSMContext):
         return
 
     await save_patient(message.from_user.id, message.from_user.full_name, phone)
-    await confirm_booking(message, state)
+    
+    # После сохранения телефона показываем подтверждение
+    data = await state.get_data()
+    slot_date = data.get("slot_date")
+    slot_time = data.get("slot_time")
+    
+    # Проверяем, активна ли еще временная блокировка
+    temp_booking = await get_user_temp_booking(message.from_user.id)
+    if not temp_booking:
+        await message.answer(
+            "❌ Время на подтверждение истекло.\n"
+            "Пожалуйста, запишитесь заново.",
+            reply_markup=patient_main_menu()
+        )
+        await state.clear()
+        return
+    
+    expires_at = datetime.fromisoformat(temp_booking['expires_at'])
+    time_str = expires_at.strftime("%H:%M:%S")
+    
+    await message.answer(
+        f"📅 {slot_date} в {slot_time}\n\n"
+        f"⏳ Время на подтверждение: до {time_str}\n\n"
+        f"Подтвердите запись:",
+        reply_markup=create_confirmation_keyboard()
+    )
+    await state.set_state(BookingStates.waiting_for_confirmation)
 
-async def confirm_booking(event, state: FSMContext):
+@router.callback_query(BookingStates.waiting_for_confirmation, F.data == "confirm_booking")
+async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slot_id = data["slot_id"]
     selected_date = data["selected_date"]
     
-    # Дополнительная проверка на блокировку (на случай, если заблокировали в процессе)
+    # Проверяем, активна ли временная блокировка
+    temp_booking = await get_user_temp_booking(callback.from_user.id)
+    if not temp_booking:
+        await callback.message.edit_text(
+            "❌ Время на подтверждение истекло.\n"
+            "Пожалуйста, запишитесь заново.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
+            reply_markup=patient_main_menu()
+        )
+        await state.clear()
+        return
+    
+    # Дополнительная проверка на блокировку дня
     blocked = await get_blocked_day(selected_date)
     if blocked:
         reason_map = {
@@ -189,53 +293,65 @@ async def confirm_booking(event, state: FSMContext):
         }
         message_text = reason_map.get(blocked["reason"], f"🚫 {blocked['reason']}")
         
-        await event.answer(
+        await callback.message.edit_text(
             f"{message_text}\n"
             f"Пожалуйста, выберите другую дату.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
         return
     
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT slot_time FROM slots WHERE id = ?", 
-            (slot_id,)
-        )
-        row = await cursor.fetchone()
-        if not row:
-            await event.answer("❌ Ошибка: слот не найден", reply_markup=patient_main_menu())
-            await state.clear()
-            return
-        
-        slot_time = row[0]
-    
+    # Проверяем время записи (не менее 3 часов)
+    slot_time = data.get("slot_time")
     appointment_time = datetime.strptime(f"{selected_date} {slot_time}", "%Y-%m-%d %H:%M")
     now = datetime.now()
     
     if appointment_time - now < timedelta(hours=3):
-        await event.answer(
+        await callback.message.edit_text(
             "❌ Запись возможна не позднее чем за 3 часа до приёма.\n"
             "Пожалуйста, выберите другое время.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
         return
     
-    patient_id = await get_patient_id(event.from_user.id)
+    patient_id = await get_patient_id(callback.from_user.id)
     
     if not patient_id:
-        await event.answer("❌ Ошибка: пациент не найден", reply_markup=patient_main_menu())
+        await callback.message.edit_text(
+            "❌ Ошибка: пациент не найден", 
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
+            reply_markup=patient_main_menu()
+        )
         await state.clear()
         return
     
+    # Бронируем слот
     success = await book_slot(slot_id, patient_id, selected_date)
     
     if success:
-        await event.answer(
+        # Удаляем временную блокировку
+        await delete_temp_booking(temp_booking['slot_date'], temp_booking['slot_time'])
+        
+        await callback.message.edit_text(
             "✅ Вы успешно записаны!\n\n"
             "🔔 Напоминание придет за 24 часа.\n\n"
             "❌ Отменить можно в «Мои записи»",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
     else:
@@ -250,11 +366,36 @@ async def confirm_booking(event, state: FSMContext):
             else:
                 error_msg = "❌ К сожалению, это время только что заняли.\nПопробуйте выбрать другое."
         
-        await event.answer(
+        await callback.message.edit_text(
             error_msg,
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
     
+    await state.clear()
+
+@router.callback_query(BookingStates.waiting_for_confirmation, F.data == "cancel_confirmation")
+async def cancel_confirmation(callback: CallbackQuery, state: FSMContext):
+    # Удаляем временную блокировку
+    temp_booking = await get_user_temp_booking(callback.from_user.id)
+    if temp_booking:
+        await delete_temp_booking(temp_booking['slot_date'], temp_booking['slot_time'])
+    
+    # Убираем клавиатуру из редактируемого сообщения
+    await callback.message.edit_text(
+        "❌ Запись отменена.\n"
+        "Если передумаете - запишитесь снова.",
+        reply_markup=None  # ← ВАЖНО: убираем клавиатуру
+    )
+    
+    # Отправляем новое сообщение с главным меню
+    await callback.message.answer(
+        "Главное меню:",
+        reply_markup=patient_main_menu()
+    )
     await state.clear()
 
 @router.message(F.text == "📅 Мои записи")
@@ -283,7 +424,14 @@ async def my_appointments(message: Message):
 
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_appointment(callback: CallbackQuery):
-    slot_id = int(callback.data.split("_")[1])
+    # Проверяем, что после cancel_ идёт число (ID слота), а не текст
+    parts = callback.data.split("_")
+    if len(parts) != 2 or not parts[1].isdigit():
+        # Это не отмена записи, а что-то другое (например, cancel_confirmation)
+        await callback.answer()
+        return
+    
+    slot_id = int(parts[1])
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -304,9 +452,6 @@ async def cancel_appointment(callback: CallbackQuery):
             await callback.message.answer("❌ Это не ваша запись")
             await callback.answer()
             return
-        
-        # ✅ УБРАЛИ ПРОВЕРКУ НА 24 ЧАСА
-        # Клиент может отменить в любой момент
 
     success = await cancel_slot(slot_id, patient_id)
 
