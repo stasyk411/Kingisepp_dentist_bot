@@ -273,6 +273,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             "❌ Время на подтверждение истекло.\n"
             "Пожалуйста, запишитесь заново.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
@@ -292,6 +296,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             f"{message_text}\n"
             f"Пожалуйста, выберите другую дату.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
@@ -306,6 +314,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             "❌ Запись возможна не позднее чем за 3 часа до приёма.\n"
             "Пожалуйста, выберите другое время.",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
@@ -316,6 +328,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     if not patient_id:
         await callback.message.edit_text(
             "❌ Ошибка: пациент не найден", 
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
         await state.clear()
@@ -332,6 +348,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
             "✅ Вы успешно записаны!\n\n"
             "🔔 Напоминание придет за 24 часа.\n\n"
             "❌ Отменить можно в «Мои записи»",
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
     else:
@@ -348,6 +368,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(
             error_msg,
+            reply_markup=None
+        )
+        await callback.message.answer(
+            "Главное меню:",
             reply_markup=patient_main_menu()
         )
     
@@ -360,9 +384,16 @@ async def cancel_confirmation(callback: CallbackQuery, state: FSMContext):
     if temp_booking:
         await delete_temp_booking(temp_booking['slot_date'], temp_booking['slot_time'])
     
+    # Убираем клавиатуру из редактируемого сообщения
     await callback.message.edit_text(
         "❌ Запись отменена.\n"
         "Если передумаете - запишитесь снова.",
+        reply_markup=None  # ← ВАЖНО: убираем клавиатуру
+    )
+    
+    # Отправляем новое сообщение с главным меню
+    await callback.message.answer(
+        "Главное меню:",
         reply_markup=patient_main_menu()
     )
     await state.clear()
@@ -393,7 +424,14 @@ async def my_appointments(message: Message):
 
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_appointment(callback: CallbackQuery):
-    slot_id = int(callback.data.split("_")[1])
+    # Проверяем, что после cancel_ идёт число (ID слота), а не текст
+    parts = callback.data.split("_")
+    if len(parts) != 2 or not parts[1].isdigit():
+        # Это не отмена записи, а что-то другое (например, cancel_confirmation)
+        await callback.answer()
+        return
+    
+    slot_id = int(parts[1])
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
