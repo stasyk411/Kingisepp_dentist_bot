@@ -1,0 +1,15 @@
+[Unit]
+Description=Dentist Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/dentist_bot
+Environment="PATH=/root/dentist_bot/venv/bin"
+ExecStart=/root/dentist_bot/venv/bin/python /root/dentist_bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

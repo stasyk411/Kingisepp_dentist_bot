@@ -14,6 +14,7 @@ async def run_migrations(db_path: str) -> None:
     manager.register(CreateInitialTables())
     manager.register(AddBlockedDaysTable())
     manager.register(AddWorkingHoursTable())
+    manager.register(AddTempBookingsTable())
     
     # Применяем миграции
     await manager.migrate()
