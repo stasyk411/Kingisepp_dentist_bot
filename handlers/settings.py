@@ -16,7 +16,7 @@ router = Router()
 class TimezoneStates(StatesGroup):
     waiting_for_time = State()
 
-@router.message(F.text == "⚙️ Настройки")
+@router.message(F.text == "🌍 Часовой пояс")
 async def show_settings(message: Message):
     """Показывает текущие настройки"""
     offset = await get_user_offset(message.from_user.id)
