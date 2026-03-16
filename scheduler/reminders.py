@@ -4,7 +4,7 @@
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -12,7 +12,8 @@ from apscheduler.triggers.cron import CronTrigger
 from database import (
     get_slots_for_reminder,
     mark_reminder_sent,
-    get_patient_telegram_by_slot
+    get_patient_telegram_by_slot,
+    get_user_offset_by_patient_id  # ✅ ДОБАВЛЕНО
 )
 from config import BOT_TOKEN, ADMIN_IDS
 from aiogram import Bot
@@ -33,12 +34,20 @@ async def send_reminder(slot_id: int, patient_id: int, slot_date: str, slot_time
             print(f"❌ Не найден telegram_id для слота {slot_id}")
             return
         
+        # Получаем сдвиг пользователя
+        offset = await get_user_offset_by_patient_id(patient_id)
+        
+        # Конвертируем время в местное
+        hour, minute = map(int, slot_time.split(':'))
+        local_hour = (hour + offset) % 24
+        local_time = f"{local_hour:02d}:{minute:02d}"
+        
         # Формируем сообщение
         text = (
             f"🔔 НАПОМИНАНИЕ\n\n"
             f"У вас запись к стоматологу:\n"
             f"📅 {slot_date}\n"
-            f"⏰ {slot_time}\n\n"
+            f"⏰ {local_time}\n\n"  # ✅ Теперь местное время
             f"Пожалуйста, не опаздывайте!"
         )
         
@@ -51,7 +60,7 @@ async def send_reminder(slot_id: int, patient_id: int, slot_date: str, slot_time
         
         # Отмечаем что напоминание отправлено
         await mark_reminder_sent(slot_id)
-        print(f"✅ Напоминание отправлено: слот {slot_id} -> {telegram_id}")
+        print(f"✅ Напоминание отправлено: слот {slot_id} -> {telegram_id} (местное {local_time})")
         
     except Exception as e:
         print(f"❌ Ошибка при отправке напоминания: {e}")
@@ -102,14 +111,18 @@ async def send_daily_backup():
     """Отправляет ежедневный бэкап БД админу"""
     try:
         from database import DB_PATH
+        from aiogram.types import FSInputFile
         
         for admin_id in ADMIN_IDS:
-            with open(DB_PATH, 'rb') as db_file:
-                await bot.send_document(
-                    chat_id=admin_id,
-                    document=db_file,
-                    caption=f"📦 Бэкап БД за {datetime.now().strftime('%Y-%m-%d')}"
-                )
+            document = FSInputFile(
+                path=DB_PATH,
+                filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            )
+            await bot.send_document(
+                chat_id=admin_id,
+                document=document,
+                caption=f"📦 Бэкап БД за {datetime.now().strftime('%Y-%m-%d')}"
+            )
         print(f"✅ Бэкап отправлен админам {ADMIN_IDS}")
     except Exception as e:
         print(f"❌ Ошибка бэкапа: {e}")

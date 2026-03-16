@@ -200,8 +200,79 @@ async def save_patient(telegram_id: int, name: str, phone: str = None):
             extra={"telegram_id": telegram_id, "name": name}
         )
 
-async def get_free_times(date_str: str):
-    """Возвращает свободные слоты на дату"""
+# ============================================
+# НАСТРОЙКИ ПОЛЬЗОВАТЕЛЕЙ (UTC)
+# ============================================
+
+async def get_user_offset(user_id: int) -> int:
+    """
+    Возвращает часовой сдвиг пользователя от UTC.
+    Если настройки нет — создаёт с дефолтным +3 (Москва)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Пробуем получить существующую настройку
+        cursor = await db.execute(
+            "SELECT utc_offset FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+        
+        if row:
+            return row[0]
+        
+        # Если нет — создаём запись с дефолтом +3
+        await db.execute(
+            "INSERT INTO user_settings (user_id, utc_offset) VALUES (?, 3)",
+            (user_id,)
+        )
+        await db.commit()
+        return 3
+
+async def save_user_offset(user_id: int, offset: int):
+    """
+    Сохраняет часовой сдвиг пользователя
+    """
+    # Валидация: сдвиг должен быть в разумных пределах
+    if offset < -12 or offset > 14:
+        logger.error(f"Недопустимый сдвиг: {offset}")
+        return False
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO user_settings (user_id, utc_offset, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (user_id, offset))
+        await db.commit()
+        logger.info(f"Сохранён сдвиг {offset} для пользователя {user_id}")
+        return True
+
+async def get_patient_id_by_telegram(telegram_id: int) -> int:
+    """
+    Получает ID пациента по telegram_id
+    (обёртка для совместимости)
+    """
+    return await get_patient_id(telegram_id)
+
+async def get_user_offset_by_patient_id(patient_id: int) -> int:
+    """
+    Получает часовой сдвиг по ID пациента
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT utc_offset FROM user_settings 
+            WHERE user_id = ?
+        """, (patient_id,))
+        row = await cursor.fetchone()
+        return row[0] if row else 3
+
+# ============================================
+# СЛОТЫ (UTC)
+# ============================================
+
+async def get_free_times_utc(date_str: str):
+    """
+    Возвращает свободные слоты на дату в UTC
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT id, slot_time 
@@ -290,7 +361,7 @@ async def get_all_working_hours():
         return result
 
 # ============================================
-# НАПОМИНАНИЯ — ЗА 24 ЧАСА
+# НАПОМИНАНИЯ — ЗА 24 ЧАСА (UTC)
 # ============================================
 
 async def get_slots_for_reminder() -> list:
@@ -300,8 +371,7 @@ async def get_slots_for_reminder() -> list:
     - reminder_sent = 0
     - до начала приёма осталось ровно 24 часа (±5 минут)
     
-    ⚠️ УЧТЁН ЧАСОВОЙ ПОЯС: время в БД хранится по МСК (UTC+3),
-    а SQLite datetime('now') возвращает UTC. Добавляем смещение -3 часа.
+    Время в БД хранится в UTC, поэтому смещение не требуется.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
@@ -309,7 +379,7 @@ async def get_slots_for_reminder() -> list:
             FROM slots 
             WHERE status = 'booked' 
             AND reminder_sent = 0
-            AND datetime(slot_date || ' ' || slot_time, '-24 hours', '-3 hours') 
+            AND datetime(slot_date || ' ' || slot_time, '-24 hours') 
                 BETWEEN datetime('now', '-5 minutes') 
                 AND datetime('now', '+5 minutes')
         """)

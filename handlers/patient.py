@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 
 from database import (
     DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, 
-    get_free_times, get_blocked_day, get_all_blocked_days,
-    create_temp_booking, check_temp_booking, get_user_temp_booking, delete_temp_booking
+    get_free_times_utc, get_blocked_day, get_all_blocked_days,
+    create_temp_booking, check_temp_booking, get_user_temp_booking, delete_temp_booking,
+    get_user_offset  # ✅ ДОБАВЛЕНО
 )
 from keyboards.patient_kb import patient_main_menu
 from keyboards.calendar_kb import create_calendar
@@ -21,7 +22,7 @@ class BookingStates(StatesGroup):
     waiting_for_date = State()
     waiting_for_time = State()
     waiting_for_phone = State()
-    waiting_for_confirmation = State()  # Новый state для подтверждения
+    waiting_for_confirmation = State()
 
 @router.message(F.text == "📝 Записаться")
 async def start_booking(message: Message, state: FSMContext):
@@ -29,11 +30,11 @@ async def start_booking(message: Message, state: FSMContext):
     patient_id = await get_patient_id(message.from_user.id)
     
     if patient_id:
-        # Проверяем, есть ли у него активная запись
+        # Проверяем, есть ли у него активная запись (ТОЛЬКО БУДУЩИЕ)
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT slot_date, slot_time FROM slots 
-                WHERE patient_id = ? AND status = 'booked'
+                WHERE patient_id = ? AND status = 'booked' AND slot_date >= date('now')
             """, (patient_id,))
             existing = await cursor.fetchone()
             
@@ -86,10 +87,9 @@ async def cancel_booking(callback: CallbackQuery, state: FSMContext):
 async def date_selected(callback: CallbackQuery, state: FSMContext):
     date_str = callback.data.split("_")[1]
     
-    # ✅ Проверяем, не заблокирован ли день
+    # Проверяем, не заблокирован ли день
     blocked = await get_blocked_day(date_str)
     if blocked:
-        # Показываем причину блокировки
         reason_map = {
             "Отпуск": "🏖 Врач в отпуске",
             "Больничный": "🤒 Врач на больничном",
@@ -107,19 +107,28 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
     
     await state.update_data(selected_date=date_str)
 
-    # Получаем свободные слоты
-    free_times = await get_free_times(date_str)
+    # Получаем слоты в UTC и сдвиг пользователя
+    free_times_utc = await get_free_times_utc(date_str)
+    offset = await get_user_offset(callback.from_user.id)
     
-    if not free_times:
+    if not free_times_utc:
         await callback.message.answer(
             "❌ На эту дату нет свободных слотов.\n"
             "Попробуйте выбрать другую дату."
         )
         return
 
+    # Конвертируем UTC в местное время
+    converted_times = []
+    for slot_id, utc_time in free_times_utc:
+        hour, minute = map(int, utc_time.split(':'))
+        local_hour = (hour + offset) % 24
+        local_time = f"{local_hour:02d}:{minute:02d}"
+        converted_times.append((slot_id, local_time))
+
     await callback.message.edit_text(
         f"📅 {date_str}\n\nВыберите время:", 
-        reply_markup=create_time_keyboard(free_times)
+        reply_markup=create_time_keyboard(converted_times)
     )
     await state.set_state(BookingStates.waiting_for_time)
 
@@ -183,15 +192,14 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
         )
         patient = await cursor.fetchone()
     
-    # Показываем экран подтверждения с таймером
+    # Показываем экран подтверждения
     expires_at = datetime.now() + timedelta(minutes=10)
-    time_str = expires_at.strftime("%H:%M:%S")
+    time_str = expires_at.strftime("%H:%M")
     
     if patient and patient[0]:
         # Телефон есть - сразу показываем подтверждение
         await callback.message.edit_text(
             f"📅 {slot_date} в {slot_time}\n\n"
-            f"⏳ Время на подтверждение: до {time_str}\n\n"
             f"Подтвердите запись:",
             reply_markup=create_confirmation_keyboard()
         )
@@ -201,8 +209,7 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             f"📅 {slot_date} в {slot_time}\n\n"
             f"📱 Введите ваш номер телефона для связи\n"
-            f"(например: +79001234567)\n\n"
-            f"⏳ Время на подтверждение: до {time_str}",
+            f"(например: +79001234567)",
             reply_markup=None
         )
         await state.set_state(BookingStates.waiting_for_phone)
@@ -250,12 +257,8 @@ async def phone_entered(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    expires_at = datetime.fromisoformat(temp_booking['expires_at'])
-    time_str = expires_at.strftime("%H:%M:%S")
-    
     await message.answer(
         f"📅 {slot_date} в {slot_time}\n\n"
-        f"⏳ Время на подтверждение: до {time_str}\n\n"
         f"Подтвердите запись:",
         reply_markup=create_confirmation_keyboard()
     )
@@ -266,6 +269,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     slot_id = data["slot_id"]
     selected_date = data["selected_date"]
+    slot_time = data.get("slot_time")
+    
+    # Получаем сдвиг пользователя для проверки времени
+    offset = await get_user_offset(callback.from_user.id)
     
     # Проверяем, активна ли временная блокировка
     temp_booking = await get_user_temp_booking(callback.from_user.id)
@@ -305,14 +312,14 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
     
-    # Проверяем время записи (не менее 3 часов)
-    slot_time = data.get("slot_time")
-    appointment_time = datetime.strptime(f"{selected_date} {slot_time}", "%Y-%m-%d %H:%M")
-    now = datetime.now()
+    # Проверяем время записи (не менее 3 часов по местному времени)
+    appointment_utc = datetime.strptime(f"{selected_date} {slot_time}", "%Y-%m-%d %H:%M")
+    appointment_local = appointment_utc + timedelta(hours=offset)
+    now_local = datetime.now() + timedelta(hours=offset)
     
-    if appointment_time - now < timedelta(hours=3):
+    if appointment_local - now_local < timedelta(hours=3):
         await callback.message.edit_text(
-            "❌ Запись возможна не позднее чем за 3 часа до приёма.\n"
+            "❌ Запись возможна не позднее чем за 3 часа до приёма (по вашему местному времени).\n"
             "Пожалуйста, выберите другое время.",
             reply_markup=None
         )
@@ -388,7 +395,7 @@ async def cancel_confirmation(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "❌ Запись отменена.\n"
         "Если передумаете - запишитесь снова.",
-        reply_markup=None  # ← ВАЖНО: убираем клавиатуру
+        reply_markup=None
     )
     
     # Отправляем новое сообщение с главным меню
@@ -416,11 +423,19 @@ async def my_appointments(message: Message):
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    for slot_id, date, time in appointments:
+    # Получаем сдвиг пользователя для конвертации времени
+    offset = await get_user_offset(message.from_user.id)
+    
+    for slot_id, date, utc_time in appointments:
+        # Конвертируем UTC в местное время
+        hour, minute = map(int, utc_time.split(':'))
+        local_hour = (hour + offset) % 24
+        local_time = f"{local_hour:02d}:{minute:02d}"
+        
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{slot_id}")]
         ])
-        await message.answer(f"📅 {date} в {time}", reply_markup=kb)
+        await message.answer(f"📅 {date} в {local_time}", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_appointment(callback: CallbackQuery):
