@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from database import (
     DB_PATH, block_day, get_all_blocked_days,
     get_all_working_hours, get_working_hours,
-    generate_future_slots, get_patient_telegram_by_slot
+    generate_future_slots, get_patient_telegram_by_slot,
+    get_user_offset  # ✅ ДОБАВЛЕНО для конвертации
 )
 from keyboards.admin_kb import admin_main_menu
 from keyboards.calendar_kb import create_calendar
@@ -26,6 +27,12 @@ class SettingsStates(StatesGroup):
     # choosing_end не нужен - там сразу сохранение
 
 # -------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------------------
+
+def utc_to_local(utc_time: str, offset: int) -> str:
+    """Конвертирует UTC время в местное по сдвигу"""
+    hour, minute = map(int, utc_time.split(':'))
+    local_hour = (hour + offset) % 24
+    return f"{local_hour:02d}:{minute:02d}"
 
 async def notify_patients_about_cancellation(bot: Bot, date_str: str, reason: str):
     """Уведомляет всех пациентов об отмене дня"""
@@ -53,10 +60,14 @@ async def notify_patients_about_cancellation(bot: Bot, date_str: str, reason: st
     
     for slot_id, telegram_id, slot_time, patient_name in patients:
         try:
+            # Получаем offset пациента для конвертации времени в уведомлении
+            patient_offset = await get_user_offset(telegram_id)
+            local_time = utc_to_local(slot_time, patient_offset)
+            
             text = (
                 f"⚠️ <b>ВНИМАНИЕ! Приём отменён</b>\n\n"
                 f"🦷 Уважаемый(ая) {patient_name},\n\n"
-                f"К сожалению, ваш приём на <b>{pretty_date} в {slot_time}</b> "
+                f"К сожалению, ваш приём на <b>{pretty_date} в {local_time}</b> "
                 f"отменяется по причине: <b>{reason}</b>.\n\n"
                 f"📞 Для записи на другое время свяжитесь с администратором "
                 f"или выберите новую дату в боте.\n\n"
@@ -69,7 +80,8 @@ async def notify_patients_about_cancellation(bot: Bot, date_str: str, reason: st
                 "patient_id": telegram_id,
                 "slot_id": slot_id,
                 "date": date_str,
-                "time": slot_time
+                "time": slot_time,
+                "local_time": local_time
             })
         except Exception as e:
             fail_count += 1
@@ -88,10 +100,11 @@ async def today(message: Message, is_admin: bool):
         return
     
     today_str = datetime.now().strftime("%Y-%m-%d")
+    admin_offset = await get_user_offset(message.from_user.id)  # получаем offset админа
     
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            SELECT s.slot_time, p.name, p.phone
+            SELECT s.slot_time, p.name, p.phone, p.telegram_id
             FROM slots s
             JOIN patients p ON s.patient_id = p.id
             WHERE s.slot_date = ? AND s.status = 'booked'
@@ -104,8 +117,10 @@ async def today(message: Message, is_admin: bool):
         return
     
     text = "📋 Записи на сегодня:\n\n"
-    for time, name, phone in appointments:
-        text += f"🕐 {time} — {name} {phone}\n"
+    for utc_time, name, phone, telegram_id in appointments:
+        # Конвертируем время для админа
+        local_time = utc_to_local(utc_time, admin_offset)
+        text += f"🕐 {local_time} — {name} {phone}\n"
     
     await message.answer(text, reply_markup=admin_main_menu())
 
@@ -115,10 +130,11 @@ async def tomorrow(message: Message, is_admin: bool):
         return
     
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    admin_offset = await get_user_offset(message.from_user.id)
     
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            SELECT s.slot_time, p.name, p.phone
+            SELECT s.slot_time, p.name, p.phone, p.telegram_id
             FROM slots s
             JOIN patients p ON s.patient_id = p.id
             WHERE s.slot_date = ? AND s.status = 'booked'
@@ -131,8 +147,9 @@ async def tomorrow(message: Message, is_admin: bool):
         return
     
     text = "📅 Записи на завтра:\n\n"
-    for time, name, phone in appointments:
-        text += f"🕐 {time} — {name} {phone}\n"
+    for utc_time, name, phone, telegram_id in appointments:
+        local_time = utc_to_local(utc_time, admin_offset)
+        text += f"🕐 {local_time} — {name} {phone}\n"
     
     await message.answer(text, reply_markup=admin_main_menu())
 
@@ -157,6 +174,7 @@ async def cancel_day_confirm(callback: CallbackQuery, is_admin: bool):
         return
     
     date_str = callback.data.split("_")[1]
+    admin_offset = await get_user_offset(callback.from_user.id)
     
     # Проверяем, есть ли уже блокировка
     async with aiosqlite.connect(DB_PATH) as db:
@@ -183,7 +201,7 @@ async def cancel_day_confirm(callback: CallbackQuery, is_admin: bool):
     # Проверяем записи на этот день
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            SELECT s.slot_time, p.name, p.phone
+            SELECT s.slot_time, p.name, p.phone, p.telegram_id
             FROM slots s
             JOIN patients p ON s.patient_id = p.id
             WHERE s.slot_date = ? AND s.status = 'booked'
@@ -196,8 +214,13 @@ async def cancel_day_confirm(callback: CallbackQuery, is_admin: bool):
         await ask_reason(callback, date_str)
         return
     
-    # Если есть записи — показываем список и просим подтверждение
-    patients_list = "\n".join([f"  • {time} — {name} {phone}" for time, name, phone in patients])
+    # Если есть записи — показываем список с конвертированным временем
+    patients_list = ""
+    for utc_time, name, phone, telegram_id in patients:
+        # Получаем offset пациента для корректного отображения в списке
+        patient_offset = await get_user_offset(telegram_id)
+        local_time = utc_to_local(utc_time, patient_offset)
+        patients_list += f"  • {local_time} — {name} {phone}\n"
     
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, отменить день", callback_data=f"confirm_cancel_{date_str}")
@@ -270,7 +293,7 @@ async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
         """, (date_str,))
         await db.commit()
     
-    # Отправляем уведомления пациентам
+    # Отправляем уведомления пациентам с их местным временем
     success_count = 0
     fail_count = 0
     
@@ -280,10 +303,14 @@ async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
         
         for telegram_id, slot_time, patient_name in patients_to_notify:
             try:
+                # Получаем offset пациента для конвертации времени
+                patient_offset = await get_user_offset(telegram_id)
+                local_time = utc_to_local(slot_time, patient_offset)
+                
                 text = (
                     f"⚠️ ВНИМАНИЕ! Приём отменён\n\n"
                     f"Уважаемый(ая) {patient_name},\n\n"
-                    f"К сожалению, ваш приём на {pretty_date} в {slot_time} "
+                    f"К сожалению, ваш приём на {pretty_date} в {local_time} "
                     f"отменяется по причине: {reason_text}.\n\n"
                     f"Для записи на другое время позвоните по телефону: +7 (911) 775-04-24 (Голосовская Светлана Алексеевна)\n\n"
                     f"или выберите новую дату в боте.\n\n"
@@ -296,6 +323,7 @@ async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
                     "patient_id": telegram_id,
                     "date": date_str,
                     "time": slot_time,
+                    "local_time": local_time,
                     "reason": reason_text
                 })
             except Exception as e:
@@ -305,7 +333,9 @@ async def save_reason(callback: CallbackQuery, is_admin: bool, bot: Bot):
                     "error": str(e)
                 })
     
-    # Формируем ответ админу
+    # Формируем ответ админу (с его временем)
+    admin_offset = await get_user_offset(callback.from_user.id)
+    
     result_text = f"✅ День {date_str} заблокирован.\nПричина: {reason_text}\n\n"
     
     if patients_to_notify:
@@ -356,8 +386,6 @@ async def back_to_admin(callback: CallbackQuery, is_admin: bool):
     await callback.message.answer("👩‍⚕️ Панель администратора", reply_markup=admin_main_menu())
 
 # -------------------- НОВЫЕ ХЕНДЛЕРЫ НАСТРОЕК С FSM --------------------
-
-# Удален глобальный словарь user_settings
 
 @router.message(F.text == "⚙️ Настройки")
 async def settings_start(message: Message, is_admin: bool, state: FSMContext):
