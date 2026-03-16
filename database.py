@@ -299,6 +299,9 @@ async def get_slots_for_reminder() -> list:
     - статус 'booked'
     - reminder_sent = 0
     - до начала приёма осталось ровно 24 часа (±5 минут)
+    
+    ⚠️ УЧТЁН ЧАСОВОЙ ПОЯС: время в БД хранится по МСК (UTC+3),
+    а SQLite datetime('now') возвращает UTC. Добавляем смещение -3 часа.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
@@ -306,7 +309,7 @@ async def get_slots_for_reminder() -> list:
             FROM slots 
             WHERE status = 'booked' 
             AND reminder_sent = 0
-            AND datetime(slot_date || ' ' || slot_time, '-24 hours') 
+            AND datetime(slot_date || ' ' || slot_time, '-24 hours', '-3 hours') 
                 BETWEEN datetime('now', '-5 minutes') 
                 AND datetime('now', '+5 minutes')
         """)
