@@ -1,7 +1,7 @@
 import os
-import aiosqlite
 from datetime import datetime
 from aiogram import Bot
+from aiogram.types import FSInputFile  # ✅ правильный импорт для файлов
 
 # Путь к базе данных
 DB_PATH = "dentist_bot.db"
@@ -17,15 +17,20 @@ async def send_backup(bot: Bot, admin_id: int):
         # Получаем размер файла
         size_mb = os.path.getsize(DB_PATH) / 1024 / 1024
         
+        # ✅ ИСПРАВЛЕНИЕ: используем FSInputFile вместо открытия файла
+        document = FSInputFile(
+            path=DB_PATH,
+            filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        )
+        
         # Отправляем файл
-        with open(DB_PATH, 'rb') as db_file:
-            await bot.send_document(
-                admin_id,
-                db_file,
-                caption=f"📦 Бэкап базы данных\n"
-                        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-                        f"💾 Размер: {size_mb:.2f} МБ"
-            )
+        await bot.send_document(
+            chat_id=admin_id,
+            document=document,
+            caption=f"📦 Бэкап базы данных\n"
+                    f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                    f"💾 Размер: {size_mb:.2f} МБ"
+        )
         
         print(f"✅ Бэкап отправлен {datetime.now()}")
         
