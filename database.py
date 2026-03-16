@@ -58,7 +58,12 @@ async def generate_future_slots(days_ahead: int = 30):
             end_hour = int(working_hours[day_code]['end'])
             
             for hour in range(start_hour, end_hour + 1):
-                time_str = f"{hour:02d}:00"
+                # КОНВЕРТИРУЕМ ЧАСЫ ИЗ МСК В UTC
+                utc_hour = hour - 3
+                if utc_hour < 0:
+                    utc_hour += 24
+                time_str = f"{utc_hour:02d}:00"
+                
                 await db.execute("""
                     INSERT OR IGNORE INTO slots (slot_date, slot_time, status)
                     VALUES (?, ?, 'free')

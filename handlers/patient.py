@@ -9,7 +9,7 @@ from database import (
     DB_PATH, book_slot, cancel_slot, save_patient, get_patient_id, 
     get_free_times_utc, get_blocked_day, get_all_blocked_days,
     create_temp_booking, check_temp_booking, get_user_temp_booking, delete_temp_booking,
-    get_user_offset  # ✅ ДОБАВЛЕНО
+    get_user_offset
 )
 from keyboards.patient_kb import patient_main_menu
 from keyboards.calendar_kb import create_calendar
@@ -135,6 +135,7 @@ async def date_selected(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(BookingStates.waiting_for_time, F.data.startswith("time_"))
 async def time_selected(callback: CallbackQuery, state: FSMContext):
     slot_id = int(callback.data.split("_")[1])
+    print(f"🔍 [time_selected] Выбран слот ID: {slot_id}")  # ← ОТЛАДКА
     
     # Получаем дату и время слота
     async with aiosqlite.connect(DB_PATH) as db:
@@ -192,14 +193,20 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
         )
         patient = await cursor.fetchone()
     
-    # Показываем экран подтверждения
+    # Получаем offset для конвертации времени
+    offset = await get_user_offset(callback.from_user.id)
+    hour, minute = map(int, slot_time.split(':'))
+    local_hour = (hour + offset) % 24
+    local_time = f"{local_hour:02d}:{minute:02d}"
+    
+    # Показываем экран подтверждения с МЕСТНЫМ временем
     expires_at = datetime.now() + timedelta(minutes=10)
     time_str = expires_at.strftime("%H:%M")
     
     if patient and patient[0]:
-        # Телефон есть - сразу показываем подтверждение
+        # Телефон есть - сразу показываем подтверждение с местным временем
         await callback.message.edit_text(
-            f"📅 {slot_date} в {slot_time}\n\n"
+            f"📅 {slot_date} в {local_time}\n\n"
             f"Подтвердите запись:",
             reply_markup=create_confirmation_keyboard()
         )
@@ -207,7 +214,7 @@ async def time_selected(callback: CallbackQuery, state: FSMContext):
     else:
         # Телефона нет - сначала просим телефон
         await callback.message.edit_text(
-            f"📅 {slot_date} в {slot_time}\n\n"
+            f"📅 {slot_date} в {local_time}\n\n"
             f"📱 Введите ваш номер телефона для связи\n"
             f"(например: +79001234567)",
             reply_markup=None
@@ -257,8 +264,14 @@ async def phone_entered(message: Message, state: FSMContext):
         await state.clear()
         return
     
+    # Конвертируем время для отображения
+    offset = await get_user_offset(message.from_user.id)
+    hour, minute = map(int, slot_time.split(':'))
+    local_hour = (hour + offset) % 24
+    local_time = f"{local_hour:02d}:{minute:02d}"
+    
     await message.answer(
-        f"📅 {slot_date} в {slot_time}\n\n"
+        f"📅 {slot_date} в {local_time}\n\n"
         f"Подтвердите запись:",
         reply_markup=create_confirmation_keyboard()
     )
@@ -270,6 +283,8 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     slot_id = data["slot_id"]
     selected_date = data["selected_date"]
     slot_time = data.get("slot_time")
+    
+    print(f"🔍 [confirm_booking] Подтверждение слота ID: {slot_id}")  # ← ОТЛАДКА
     
     # Получаем сдвиг пользователя для проверки времени
     offset = await get_user_offset(callback.from_user.id)
@@ -345,16 +360,22 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         return
     
     # Бронируем слот
+    print(f"🔍 [confirm_booking] Вызов book_slot с ID: {slot_id}")  # ← ОТЛАДКА
     success = await book_slot(slot_id, patient_id, selected_date)
     
     if success:
         # Удаляем временную блокировку
         await delete_temp_booking(temp_booking['slot_date'], temp_booking['slot_time'])
         
+        # Конвертируем время для отображения в сообщении
+        hour, minute = map(int, slot_time.split(':'))
+        local_hour = (hour + offset) % 24
+        local_time = f"{local_hour:02d}:{minute:02d}"
+        
         await callback.message.edit_text(
-            "✅ Вы успешно записаны!\n\n"
-            "🔔 Напоминание придет за 24 часа.\n\n"
-            "❌ Отменить можно в «Мои записи»",
+            f"✅ Вы успешно записаны на {selected_date} в {local_time}!\n\n"
+            f"🔔 Напоминание придет за 24 часа.\n\n"
+            f"❌ Отменить можно в «Мои записи»",
             reply_markup=None
         )
         await callback.message.answer(
@@ -427,6 +448,8 @@ async def my_appointments(message: Message):
     offset = await get_user_offset(message.from_user.id)
     
     for slot_id, date, utc_time in appointments:
+        print(f"🔍 [my_appointments] Слот в списке: ID={slot_id}, время={utc_time}")  # ← ОТЛАДКА
+        
         # Конвертируем UTC в местное время
         hour, minute = map(int, utc_time.split(':'))
         local_hour = (hour + offset) % 24
