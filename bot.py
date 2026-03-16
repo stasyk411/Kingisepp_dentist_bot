@@ -1,13 +1,13 @@
 import asyncio
 import logging
-import aiosqlite  # добавить в начало файла
-from datetime import datetime, timedelta  # ДОБАВЛЕНО
+import aiosqlite
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, ADMIN_IDS
-from database import init_db, DB_PATH  # ДОБАВЛЕН DB_PATH
-from handlers import patient, admin, common
+from database import init_db, DB_PATH
+from handlers import patient, admin, common, settings  # ✅ ДОБАВЛЕН settings
 from middlewares.role_check import RoleCheckMiddleware
 from scheduler.backup import send_backup
 from scheduler.reminders import start_scheduler
@@ -83,6 +83,7 @@ async def main():
     dp.include_router(common.router)
     dp.include_router(patient.router)
     dp.include_router(admin.router)
+    dp.include_router(settings.router)  # ✅ ДОБАВЛЕН РОУТЕР НАСТРОЕК
 
     await init_db()
     await dp.start_polling(bot)
